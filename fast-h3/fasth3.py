@@ -38,6 +38,7 @@ from reactor_runtime import (
     ClientInfo,
     InputField,
     ReactorModel,
+    UploadedFile,
     connected,
     event,
     get_weights_path,
@@ -71,6 +72,7 @@ from fasth3_types import (
     PromptAccepted,
     QueueUpdate,
     SeedAccepted,
+    SeedImageAccepted,
     SessionReset,
     StateUpdate,
 )
@@ -184,6 +186,12 @@ class FastH3(ReactorModel):
         self._prompt_epoch: int = 0
         self._channel_running: bool = False
         self._stop_channel: bool = False
+        # An optional seed frame (uint8 RGB HWC) from an uploaded image
+        # (`set_seed_image`): when set, the next take's clip 0 opens FL2VA-anchored
+        # on it (image-to-video) instead of from text alone, and is consumed once
+        # when that take starts. None is the plain text-to-video opener.
+        # Continuity only.
+        self._seed_anchor = None
 
         # The two queues, and the playout lifecycle around them: builds
         # consume `_generation` from the front and finished clips join the
@@ -679,6 +687,7 @@ class FastH3(ReactorModel):
         )
         self._prompt = ""
         self._prompt_metadata = ""
+        self._seed_anchor = None
         await self._send_state_update()
         return ContinuityAccepted(continuity=enabled)
 
@@ -739,6 +748,75 @@ class FastH3(ReactorModel):
         return PromptAccepted(prompt=prompt)
 
     @event(
+        name="set_seed_image",
+        description=(
+            "Seed the continuous take from an uploaded image (continuity mode "
+            "only) — image-to-video: the still becomes the take's opening "
+            "moment and the stream animates forward from it. The seed conditions "
+            "clip 0 the same way the take chains its own clips, and the generator "
+            "round-trips it through the model's VAE so an off-distribution source "
+            "(a phone photo, a different colour space) is pulled onto the model's "
+            "own look. The seed is held until the take starts (`set_prompt`) and "
+            "is used once; `reset` or `stop` drops it. Send it before "
+            "`set_prompt`. To continue from a video, extract the frame you want "
+            "and send it here as an image. Emits `seed_image_accepted` and "
+            "`state_update`, or `command_error` when the model runs the clip "
+            "queue, a take is already running, or the file is not a decodable "
+            "image."
+        ),
+    )
+    async def set_seed_image(
+        self,
+        image: UploadedFile = InputField(
+            moderate=True,
+            description=(
+                "A still image to animate from. Common formats decode; the frame "
+                "is fitted to the session canvas."
+            ),
+        ),
+    ) -> SeedImageAccepted:
+        """Decode an uploaded image into the seed frame for the next take."""
+        if not self._continuity:
+            await self._refuse(
+                "set_seed_image",
+                "`set_seed_image` seeds a continuity take; this stream uses the "
+                "clip queue.",
+            )
+            return None
+        if self._channel_running:
+            await self._refuse(
+                "set_seed_image",
+                "A take is already running; `stop` it before seeding a new one.",
+            )
+            return None
+
+        import numpy as np
+        from PIL import Image
+
+        import fasth3_image as image_decode
+
+        try:
+            frame = image_decode.decode_seed_frame(
+                image.data, image.mime_type, image.name
+            )
+        except image_decode.SeedDecodeError as error:
+            await self._refuse("set_seed_image", str(error))
+            return None
+
+        # Fit the seed to the session canvas so the anchor (and its exposure
+        # reference) match the frames the take will produce. The generator would
+        # resize anyway; doing it here keeps the whole path at one resolution.
+        height, width = self._canvas()
+        anchor = Image.fromarray(frame).resize(
+            (width, height), Image.Resampling.LANCZOS
+        )
+        self._seed_anchor = np.asarray(anchor, dtype=np.uint8)
+        await self._send_state_update()
+        return SeedImageAccepted(
+            filename=image.name, width=width, height=height
+        )
+
+    @event(
         name="stop",
         description=(
             "Cut what is playing to black within a fraction of a second. In "
@@ -765,6 +843,7 @@ class FastH3(ReactorModel):
             self._stop_channel = True
             self._prompt = ""
             self._prompt_metadata = ""
+            self._seed_anchor = None
             return
         if self._current_clip() is None:
             await self._refuse("stop", "No clip is playing.")
@@ -951,6 +1030,7 @@ class FastH3(ReactorModel):
             self._prompt = ""
             self._prompt_metadata = ""
             self._prompt_epoch += 1
+            self._seed_anchor = None
             self._clip_frames = self.config.continuity_clip_frames
             self._seed = self.config.seed
             self._aspect = self.config.aspect
@@ -1067,11 +1147,17 @@ class FastH3(ReactorModel):
         prompt = self._prompt
         take_epoch = self._prompt_epoch
         started_at = time.monotonic()
-        # Clip 0 opens plain: text-to-video, no first-frame anchor. The take
-        # then chains every later clip on its own colour-matched last frame.
+        # A seed from `set_seed_image` opens clip 0 FL2VA-anchored on the
+        # uploaded still (image-to-video); the generator VAE round-trips it onto
+        # the model's distribution. Consumed once — the take chains its own
+        # frames from clip 1 on. No seed is the plain text-to-video opener.
+        seed_anchor = None
+        if self._seed_anchor is not None:
+            seed_anchor = Image.fromarray(self._seed_anchor)
+            self._seed_anchor = None
         job = self.backend.submit_continuity(
             index=0, frames=frames, prompt=prompt, seed=self._seed,
-            height=height, width=width, anchor=None, seam_frames=seam_frames,
+            height=height, width=width, anchor=seed_anchor, seam_frames=seam_frames,
         )
         await self._send_state_update()
 

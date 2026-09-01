@@ -164,7 +164,7 @@ size in force.
 ## Commands
 
 The two modes offer disjoint surfaces; `state_update.valid_commands` names the
-live set. `set_prompt` is continuity-only;
+live set. `set_prompt`/`set_seed_image` are continuity-only;
 `enqueue`/`play`/`move`/`pop`/`get_queue`/`set_autoplay` are queue-only. The rest
 are shared. `set_continuity` is the runtime toggle between the two — offered
 while the session is idle so a client picks the mode without a config change.
@@ -172,6 +172,7 @@ while the session is idle so a client picks the mode without a config change.
 | Command | Parameters | Effect | Rejected when |
 |---|---|---|---|
 | `set_prompt` | `prompt` (≤ 800 chars), `metadata` (≤ 2000 chars) | **Continuity mode.** Sets the prompt the continuous take follows; the first starts the take, a later one re-anchors it. Replies `prompt_accepted`. | empty prompt, or the model runs the queue |
+| `set_seed_image` | `image` (uploaded still) | **Continuity mode.** Seeds the next take (image-to-video): the still becomes clip 0's opening moment and the stream animates forward. Fitted to the canvas, held until `set_prompt` starts the take, used once, dropped by `reset`/`stop`. Replies `seed_image_accepted`. To continue from a video, send the frame you want as an image. | a take is already running, a video or undecodable/unsupported file, or the model runs the queue |
 | `enqueue` | `prompt` (≤ 800 chars), `metadata` (≤ 2000 chars), `seed` (optional, ≥ 0), `seconds` (optional, 5.167–14.375), `position` (optional, ≥ 0) | **Queue mode.** Enters the generation queue at `position` (0 = next build; omitted = the back); replies `clip_queued` with the full `ClipInfo`. Without a seed the session's advancing default is used; without `seconds` the session's default length. | generation queue full, empty prompt, or the model runs continuity |
 | `move` | `clip_id` (UUID), `position` (≥ 0) | Repositions the clip within whichever queue holds it; 0 = front, clamped to the back. Replies `clip_moved` with the queue's name and the landing position. | unknown or missing id |
 | `play` | `clip_id` (optional UUID) | Streams the playout queue's front clip, or the named one. Emits `clip_started` as frames begin. | already playing, unknown id, clip still generating |
@@ -209,6 +210,7 @@ A rejected command has no effect and is answered by a broadcast
 | `canvas_accepted` | the caller | Reply to `set_canvas`. Carries the exact pixel size. |
 | `prompt_accepted` | the caller | Reply to `set_prompt` (continuity). Carries the prompt the take now follows. |
 | `continuity_accepted` | the caller | Reply to `set_continuity`. Carries the mode now in force. |
+| `seed_image_accepted` | the caller | Reply to `set_seed_image`. Carries the seed frame's fitted size. |
 | `session_reset` | the caller | Reply to `reset`. Says how many clips were dropped. |
 
 ## Session lifecycle
@@ -286,6 +288,18 @@ set and an audience is connected. The FL2VA and Ref2VA conditioning this uses
 were not distilled into the checkpoint, so the anchored continuation is a
 best-effort carry rather than a trained one — good enough to dissolve a seam,
 not a guaranteed identity lock.
+
+The take can also be **seeded from an uploaded image** (`set_seed_image`,
+[`fasth3_image.py`](./fasth3_image.py)): a still becomes clip 0's anchor and the
+stream animates forward from it — image-to-video. The seed is fed down the same
+FL2VA anchor path a self-generated clip uses, so the generator VAE-encodes it for
+conditioning and VAE-decodes the result; an off-distribution source (a phone
+photo, a different colour space) is pulled onto the model's own look by that
+round-trip, and clip 0's exposure lock is taken from the on-distribution decode,
+not the raw upload. To *continue from a video*, a client extracts the frame it
+wants and sends that as the image — the same anchor logic, without a video
+decoder in this process. Whole-video restyling (Ref2VA/LV2V) is **not** possible
+— that conditioning was never distilled into this checkpoint.
 
 **Queue (`continuity: false`)** is the clip-at-a-time channel described above:
 every clip generated independently, `enqueue`d and `play`ed, the stream holding
@@ -373,6 +387,7 @@ tree arrives through `requirements.txt` and an upgrade is a one-line bump.
 | `fasth3_assets.py` | Config parsing and weights-bundle validation |
 | `fasth3_clip_plan.py` | Clip geometry: valid lengths, frame counts, canvases, resolution tiers |
 | `fasth3_seam.py` | Continuity's pure-numpy exposure lock and linear-light seam crossfade (no torch) |
+| `fasth3_image.py` | Decode a `set_seed_image` upload (a still) to a seed frame — pure, no torch |
 | `fasth3_session_rules.py` | Which commands each session state accepts, per mode |
 | `fasth3.yaml` | `inference:` the recipe, queue size and warm-up plan, `runtime:` weight layout and engine shape |
 | `reactor.yaml` | The manifest: identity, version, resources, runtime, image build |

@@ -148,7 +148,9 @@ Director being the queues' only writer (viewer worker, idle filler, and
   `fasth3_backend.py` the FastVideo engine + worker thread, and continuity's
   post-decode pipeline that runs on it (FL2VA anchor, GPU exposure lock, GPU
   seam blend); `fasth3_seam.py` the pure-numpy exposure lock and linear-light
-  crossfade (no torch); `fasth3_assets.py` config parsing and weights validation
+  crossfade (no torch); `fasth3_image.py` decoding a `set_seed_image` upload
+  (a still, image-to-video) to the seed frame that anchors clip 0;
+  `fasth3_assets.py` config parsing and weights validation
   (the only reader of `fasth3.yaml`); `fasth3_clip_plan.py` pure clip geometry
   and resolution tiers; `fasth3_session_rules.py` which commands each state
   accepts, per mode. New code goes in the seam that owns it. No `__init__.py` —

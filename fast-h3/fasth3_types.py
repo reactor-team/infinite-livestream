@@ -320,6 +320,19 @@ class PromptAccepted(ModelMessage):
     prompt: str = MessageField(description="The prompt the stream now follows.")
 
 
+class SeedImageAccepted(ModelMessage):
+    """Emitted when `set_seed_image` accepts an uploaded still (continuity, I2V).
+
+    The take's next clip 0 opens from this image instead of from text alone: the
+    still is animated forward. The seed is held until the take starts
+    (`set_prompt`), or dropped by `reset`/`stop`.
+    """
+
+    filename: str = MessageField(description="The uploaded file's name, echoed back.")
+    width: int = MessageField(description="Width of the seed frame after fitting the canvas.")
+    height: int = MessageField(description="Height of the seed frame after fitting the canvas.")
+
+
 class CanvasAccepted(ModelMessage):
     """Emitted when `set_canvas` is accepted."""
 
