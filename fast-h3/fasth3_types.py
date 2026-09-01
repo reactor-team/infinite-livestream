@@ -100,6 +100,21 @@ class StateUpdate(ModelMessage):
     aspect: str = MessageField(description="Aspect ratio in effect, e.g. `16:9`.")
     width: int = MessageField(description="Width of every frame on `main_video`.")
     height: int = MessageField(description="Height of every frame on `main_video`.")
+    continuity: bool = MessageField(
+        description=(
+            "The stream is a single continuous take driven by `set_prompt`, not "
+            "a queue of separate clips. When true, the queue commands "
+            "(`enqueue`, `play`, `move`, `pop`) do not apply and `valid_commands` "
+            "omits them; when false, `set_prompt` does not apply."
+        )
+    )
+    prompt: str = MessageField(
+        description=(
+            "The prompt the continuous stream is currently following, set by "
+            "`set_prompt`. Empty when nothing is playing, or always in the "
+            "queue's clip-at-a-time mode."
+        )
+    )
     playing: bool = MessageField(description="A clip is streaming on the output tracks.")
     playing_clip_id: str | None = MessageField(
         description="UUID of the clip now playing, or null when the stream is idle."
@@ -275,6 +290,34 @@ class AutoplayAccepted(ModelMessage):
     enabled: bool = MessageField(
         description="Whether ready clips now start on their own when nothing is playing."
     )
+
+
+class ContinuityAccepted(ModelMessage):
+    """Emitted when `set_continuity` switches the session's mode.
+
+    Continuity is on by config default, but a client can flip the session
+    between the continuous take and the hard-cut clip queue at runtime (only
+    while idle). `state_update.valid_commands` then carries the other mode's
+    surface, so a frontend re-draws its controls from the snapshot.
+    """
+
+    continuity: bool = MessageField(
+        description=(
+            "True: the session runs the continuous FL2VA take driven by "
+            "`set_prompt`. False: the hard-cut clip queue driven by `enqueue`."
+        )
+    )
+
+
+class PromptAccepted(ModelMessage):
+    """Emitted when `set_prompt` is accepted in continuity mode.
+
+    The continuous stream re-anchors on the new prompt: the next clip opens
+    fresh on it (no first-frame carry-over from the old prompt), and every clip
+    after chains from that opener until the prompt changes again or `stop`.
+    """
+
+    prompt: str = MessageField(description="The prompt the stream now follows.")
 
 
 class CanvasAccepted(ModelMessage):

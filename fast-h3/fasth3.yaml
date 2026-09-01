@@ -6,10 +6,16 @@
 
 inference:
   # Aspect the session starts at. `set_canvas` can change it while the queue is
-  # empty and nothing plays, to any entry in clip_plan.ASPECT_CHOICES. 16:9
-  # resolves to 1344x768 — the canvas every published FastH3 number was
-  # measured at.
+  # empty and nothing plays, to any entry in clip_plan.ASPECT_CHOICES.
   aspect: "16:9"
+
+  # Resolution tier the canvas resolves at — the short edge every aspect is
+  # pinned to, in pixels (a multiple of 32, from 256 to 768). 640 is the
+  # shipping default: a 16:9 clip is then 1152x640, ~2.9% fewer pixels than the
+  # 768 tier's 1344x768, which builds proportionally faster and is the headroom
+  # that keeps continuity's gap-free chain ahead of playout. Set 768 for the
+  # full-quality tier every published single-clip number was measured at.
+  canvas_short_edge: 640
 
   # Default clip length in seconds; `set_clip_seconds` changes it per session
   # and each `enqueue` snapshots the value in force. 14.375 s is the longest
@@ -17,6 +23,30 @@ inference:
   # (15.083 s) and is then rejected for exceeding the duration cap, so 345
   # frames is the ceiling.
   clip_seconds: 14.375
+
+  # Continuity mode. Off is the client-driven two-queue channel above: clips
+  # `enqueue`d, `play`ed, hard-cut between. On turns the model into a
+  # self-continuing single-prompt channel — `set_prompt` holds one prompt and
+  # the model builds clips back to back forever, each FL2VA-anchored on the
+  # previous clip's last frame with its exposure locked to the opener's, and
+  # crossfades every boundary in linear light so subject, framing and voice
+  # carry across as one continuous stream until `stop` or a new `set_prompt`.
+  # The two modes are disjoint surfaces (see fasth3_session_rules.py); a
+  # deployment picks one here. The streaming client drives the queue, so it
+  # runs continuity: false.
+  continuity: true
+
+  # Clip length continuity holds to, in seconds (the queue's `clip_seconds`
+  # governs hard-cut mode). Continuity wants short clips: the FL2VA anchor is a
+  # single still, so a shorter clip re-anchors more often, drifts less, and
+  # keeps the builder further ahead of playout. 5.167 s is the shortest the
+  # checkpoint generates and the gap-free-with-margin length at the 640 tier.
+  continuity_clip_seconds: 5.167
+
+  # Seam overlap width in frames (continuity only). The tail of each clip and
+  # the head of the next crossfade across this many frames — linear light for
+  # video, equal-power for audio. At most half a continuity clip. 12 is 0.5 s.
+  seam_frames: 12
 
   # Most built clips the playout queue holds; generation pauses while it is
   # full. Every entry holds a fully built clip in host memory — about 1 GB of
@@ -79,13 +109,13 @@ inference:
   warmup_aspects: ["16:9"]
 
   # Clip lengths warmed at load, each one throwaway build at the primary
-  # canvas: "default" (just clip_seconds), "all" (every legal length — there
-  # are 14, 5.167 s to 14.375 s), or a list of seconds. Every unwarmed length
-  # pays a one-off ~20 s regional-compile stall on its first build. "all"
-  # costs roughly 14 builds of boot time (~5-8 min on four B200s) and is the
-  # right setting for a feed that enqueues arbitrary lengths, like the
-  # streaming client's upsampler.
-  warmup_lengths: "all"
+  # canvas: "default" (just the mode's default length), "all" (every legal
+  # length — there are 14, 5.167 s to 14.375 s), or a list of seconds. Every
+  # unwarmed length pays a one-off ~20 s regional-compile stall on its first
+  # build. Continuity holds one length (continuity_clip_seconds), so "default"
+  # warms exactly what it uses; set "all" for the hard-cut queue, whose feed
+  # enqueues arbitrary lengths (the streaming client's upsampler does).
+  warmup_lengths: "default"
 
 runtime:
   # Weight bundle layout, relative to the mounted weights root. One HF snapshot

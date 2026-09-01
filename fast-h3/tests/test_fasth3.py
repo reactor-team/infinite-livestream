@@ -21,9 +21,10 @@ import yaml
 
 import fasth3_clip_plan as clip_plan
 import fasth3_session_rules as session_rules
+import fasth3_seam as seam
 from fasth3 import EMIT_FRAMES, FastH3
 from fasth3_assets import FastH3Config, load_config
-from fasth3_backend import ClipJob
+from fasth3_backend import ClipJob, FastH3Backend
 from fasth3_queue import ClipQueue, new_entry
 from fasth3_types import ClipInfo
 
@@ -287,9 +288,14 @@ def test_the_shipped_config_parses(tmp_path):
     assert config.queue_size == 10
     assert config.aspect == "16:9"
     assert config.clip_frames == clip_plan.MAX_FRAMES
-    # The shipped config warms every legal length: a feed of arbitrary
-    # `seconds` values then never pays a first-use compile stall.
-    assert config.warmup_frames == clip_plan.legal_frame_counts()
+    # The shipped config is the continuous take: continuity on, at the 640 tier,
+    # holding the shortest (gap-free-with-margin) clip length.
+    assert config.continuity is True
+    assert config.canvas_short_edge == 640
+    assert config.continuity_clip_frames == clip_plan.MIN_FRAMES
+    assert config.seam_frames == 12
+    # Continuity holds one length, so the warm-up warms exactly that length.
+    assert config.warmup_frames == (config.continuity_clip_frames,)
 
 
 def test_every_legal_length_is_aligned_and_within_bounds():
@@ -343,7 +349,14 @@ def test_a_bad_aspect_or_queue_size_fails_startup(tmp_path):
 # included — is testable on a laptop.
 
 
-def make_config(queue_size=3, generation_queue_size=None) -> FastH3Config:
+def make_config(
+    queue_size=3,
+    generation_queue_size=None,
+    *,
+    continuity=False,
+    canvas_short_edge=768,
+    seam_frames=12,
+) -> FastH3Config:
     return FastH3Config(
         aspect="16:9",
         clip_frames=clip_plan.frames_for_seconds(clip_plan.MAX_SECONDS),
@@ -353,6 +366,10 @@ def make_config(queue_size=3, generation_queue_size=None) -> FastH3Config:
         generation_queue_size=generation_queue_size or queue_size,
         warmup_aspects=("16:9",),
         warmup_frames=(clip_plan.frames_for_seconds(clip_plan.MAX_SECONDS),),
+        canvas_short_edge=canvas_short_edge,
+        continuity=continuity,
+        continuity_clip_frames=clip_plan.frames_for_seconds(clip_plan.MIN_SECONDS),
+        seam_frames=seam_frames,
         inference={},
         runtime={},
     )
@@ -1034,6 +1051,8 @@ EXPECTED_COMMANDS = {
     "set_autoplay": "AutoplayAccepted",
     "set_canvas": "CanvasAccepted",
     "set_clip_seconds": "ClipLengthAccepted",
+    "set_continuity": "ContinuityAccepted",
+    "set_prompt": "PromptAccepted",
     "set_seed": "SeedAccepted",
     "stop": None,
 }
@@ -1051,6 +1070,8 @@ EXPECTED_MESSAGES = {
     "clip_started",
     "clip_stopped",
     "command_error",
+    "continuity_accepted",
+    "prompt_accepted",
     "queue_update",
     "seed_accepted",
     "session_reset",
@@ -1059,7 +1080,10 @@ EXPECTED_MESSAGES = {
 
 # Commands that can be refused. Each one has to say so in its own summary, and
 # name the message a client will actually receive.
-EXPECTED_REJECTIONS = ("enqueue", "move", "play", "pop", "stop", "set_canvas")
+EXPECTED_REJECTIONS = (
+    "enqueue", "move", "play", "pop", "stop", "set_canvas", "set_prompt",
+    "set_continuity",
+)
 
 # The struct every clip-referencing message embeds, and its JSON types.
 EXPECTED_CLIP_INFO = {
@@ -1373,3 +1397,383 @@ def test_the_built_capabilities_mirror_the_manifest_arch_list(manifest):
         for entry in arch_list.split(";")
     }
     assert set(sitecustomize._VSA_BUILT_CAPABILITIES) == from_manifest
+
+
+# --------------------------------------------------------------------------
+# Continuity mode: the 640 canvas tier, the disjoint command surface, the
+# exposure lock and seam arithmetic, and the held-prompt handlers. The queue's
+# hard-cut path above is unchanged — every test there runs with continuity off.
+
+
+# -- the resolution tier ---------------------------------------------------
+
+
+def test_the_default_short_edge_is_the_measured_tier():
+    """A zero-argument resolve is the 768 tier every published number used."""
+    assert clip_plan.resolve_short_edge(None) == 768
+    assert clip_plan.canvas_for_choice("16:9") == (768, 1344)
+
+
+def test_a_lower_short_edge_selects_a_smaller_canvas():
+    """640 is a real, selectable tier: a true 16:9 rounds to 1152x640."""
+    assert clip_plan.canvas_for_choice("16:9", 640) == (640, 1152)
+
+
+@pytest.mark.parametrize("aspect", clip_plan.ASPECT_CHOICES)
+def test_every_aspect_resolves_at_the_640_tier(aspect):
+    height, width = clip_plan.canvas_for_choice(aspect, 640)
+    assert min(height, width) == 640
+    assert height % 32 == 0 and width % 32 == 0
+    assert height * width <= 768 * 1344
+
+
+def test_short_edge_must_be_a_valid_tier():
+    for bad in (700, 200, 800, 0, -32):
+        with pytest.raises(ValueError):
+            clip_plan.resolve_short_edge(bad)
+    for good in (256, 640, 768):
+        assert clip_plan.resolve_short_edge(good) == good
+
+
+# -- config parsing --------------------------------------------------------
+
+
+def test_the_continuity_config_parses(tmp_path):
+    document = (
+        "inference:\n"
+        "  continuity: true\n"
+        "  canvas_short_edge: 640\n"
+        "  continuity_clip_seconds: 5.167\n"
+        "  seam_frames: 12\n"
+    )
+    path = tmp_path / "continuity.yaml"
+    path.write_text(document, encoding="utf-8")
+    config = load_config(path)
+    assert config.continuity is True
+    assert config.canvas_short_edge == 640
+    assert config.seam_frames == 12
+    assert config.continuity_clip_frames == clip_plan.MIN_FRAMES
+    # Continuity holds one length, so the warm-up warms exactly it.
+    assert config.warmup_frames == (clip_plan.MIN_FRAMES,)
+
+
+def test_continuity_defaults_off_at_the_768_tier(tmp_path):
+    """A config without the continuity keys is the unchanged hard-cut queue."""
+    path = tmp_path / "plain.yaml"
+    path.write_text("inference: {}\n", encoding="utf-8")
+    config = load_config(path)
+    assert config.continuity is False
+    assert config.canvas_short_edge == 768
+
+
+def test_a_too_wide_seam_fails_startup(tmp_path):
+    path = tmp_path / "seam.yaml"
+    path.write_text(
+        "inference:\n  continuity_clip_seconds: 5.167\n  seam_frames: 200\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        load_config(path)
+
+
+def test_a_bad_short_edge_fails_startup(tmp_path):
+    path = tmp_path / "edge.yaml"
+    path.write_text("inference:\n  canvas_short_edge: 700\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_config(path)
+
+
+# -- the disjoint command surface -----------------------------------------
+
+
+def test_continuity_offers_the_prompt_surface_not_the_queue():
+    idle = session_rules.valid_commands(
+        playing=False, generation_queued=0, generation_capacity=0,
+        playout_queued=0, continuity=True, prompt_set=False,
+    )
+    assert "set_prompt" in idle and "set_canvas" in idle
+    # Idle: the session may be switched to the hard-cut queue.
+    assert "set_continuity" in idle
+    assert not ({"enqueue", "play", "move", "pop", "get_queue", "set_autoplay"} & set(idle))
+
+    running = session_rules.valid_commands(
+        playing=True, generation_queued=0, generation_capacity=0,
+        playout_queued=0, continuity=True, prompt_set=True,
+    )
+    assert "stop" in running
+    # The canvas is fixed and the mode can no longer be switched once the
+    # take runs.
+    assert "set_canvas" not in running
+    assert "set_continuity" not in running
+
+
+def test_the_queue_surface_never_offers_set_prompt():
+    commands = session_rules.valid_commands(
+        playing=False, generation_queued=0, generation_capacity=10, playout_queued=0,
+    )
+    assert "enqueue" in commands and "set_prompt" not in commands
+
+
+def test_set_continuity_is_offered_only_while_the_queue_is_idle():
+    """The mode switch shares set_canvas's idle gate — empty queues, nothing playing."""
+    idle = session_rules.valid_commands(
+        playing=False, generation_queued=0, generation_capacity=10, playout_queued=0,
+    )
+    assert "set_continuity" in idle
+    # A queued clip fixes the mode until it drains, exactly like the canvas.
+    with_clip = session_rules.valid_commands(
+        playing=False, generation_queued=1, generation_capacity=10, playout_queued=0,
+    )
+    assert "set_continuity" not in with_clip
+    playing = session_rules.valid_commands(
+        playing=True, generation_queued=0, generation_capacity=10, playout_queued=0,
+    )
+    assert "set_continuity" not in playing
+
+
+# -- the exposure lock (the committed float64 fix) -------------------------
+
+
+def test_the_exposure_lock_pins_a_clip_to_the_reference():
+    """color_match shifts a whole clip so its per-channel mean is the target."""
+    rng = np.random.default_rng(0)
+    clip = rng.integers(0, 200, size=(6, 40, 40, 3), dtype=np.uint8)
+    target = np.array([120.0, 130.0, 140.0], np.float32)
+    matched = seam.color_match_to_reference(clip, target)
+    got = matched.reshape(-1, 3).mean(axis=0, dtype=np.float64)
+    # One integer offset for the whole clip, then a uint8 clamp: within a level.
+    assert np.allclose(got, target, atol=1.0)
+
+
+def test_the_reference_is_computed_in_float64():
+    """A wide, high-valued frame's mean must not collapse the way float32 does."""
+    frame = np.full((4000, 4000, 3), 200, np.uint8)
+    reference = seam.reference_rgb(frame)
+    assert np.allclose(reference, 200.0, atol=1e-3)
+    # The float32 mantissa-saturating reduction the bug used would land far off.
+    assert reference.dtype == np.float32 and float(reference[0]) > 199.0
+
+
+def test_the_seam_blend_has_no_midpoint_flash():
+    """Complementary linear-light weights: a constant field blends to itself."""
+    tail = np.full((12, 16, 16, 3), 128, np.uint8)
+    head = np.full((12, 16, 16, 3), 128, np.uint8)
+    blended = seam.blend_video_linear(tail, head)
+    assert blended.shape == (12, 16, 16, 3)
+    assert np.abs(blended.astype(int) - 128).max() <= 1
+
+
+# -- seam stitch arithmetic (on the worker, GPU path falls back to numpy) ---
+
+
+def continuity_backend(seam_frames=12):
+    config = make_config(continuity=True, canvas_short_edge=640, seam_frames=seam_frames)
+    backend = FastH3Backend(config, Path("."))
+    backend.reset_continuity()
+    return backend
+
+
+def test_the_seam_removes_one_overlap_per_boundary():
+    backend = continuity_backend(seam_frames=12)
+    n, k = 124, 12
+    spf = 48_000 / 24
+
+    def clip(value):
+        frames = [np.full((32, 32, 3), value, np.uint8) for _ in range(n)]
+        audio = np.zeros((1, round(n * spf)), np.int16)
+        return frames, audio
+
+    first_frames, first_audio = clip(100)
+    emit0, audio0 = backend._stitch_seam(first_frames, first_audio, k)
+    # Clip 0 opens with its tail held back for the next boundary.
+    assert len(emit0) == n - k
+    assert audio0.shape[-1] == round((n - k) * spf)
+
+    second_frames, second_audio = clip(150)
+    emit1, audio1 = backend._stitch_seam(second_frames, second_audio, k)
+    # Clip 1: k blended frames + the untouched middle = n - k again.
+    assert len(emit1) == n - k
+    assert audio1.shape[-1] == round((n - k) * spf)
+
+
+# -- the held-prompt handlers ----------------------------------------------
+
+
+@pytest.fixture
+def continuity_model():
+    """A continuity-mode FastH3 with the state ``load()`` would set, no engine."""
+    instance = FastH3()
+    instance._on_loop_ready()
+    instance.config = make_config(continuity=True, canvas_short_edge=640)
+    instance._reset_session_state()
+    sent: list = []
+
+    async def capture(message):
+        sent.append(message)
+
+    instance.send = capture
+    instance.sent = sent
+    return instance
+
+
+def test_set_prompt_holds_the_prompt_and_reanchors(continuity_model):
+    reply = run(continuity_model.set_prompt(prompt="a misty forest", metadata="m"))
+    assert reply.prompt == "a misty forest"
+    assert continuity_model._prompt == "a misty forest"
+    epoch = continuity_model._prompt_epoch
+    run(continuity_model.set_prompt(prompt="a city at night", metadata=""))
+    # A changed prompt advances the epoch, the run loop's re-anchor signal.
+    assert continuity_model._prompt == "a city at night"
+    assert continuity_model._prompt_epoch == epoch + 1
+
+
+def test_set_prompt_needs_a_prompt(continuity_model):
+    assert run(continuity_model.set_prompt(prompt="   ", metadata="")) is None
+    assert refusal(continuity_model).command == "set_prompt"
+    assert continuity_model._prompt == ""
+
+
+def test_the_queue_commands_are_refused_in_continuity(continuity_model):
+    assert run(continuity_model.enqueue(prompt="p", metadata="")) is None
+    assert refusal(continuity_model).command == "enqueue"
+    assert run(continuity_model.play(clip_id="")) is None
+    assert refusal(continuity_model).command == "play"
+    assert run(continuity_model.set_autoplay(enabled=True)) is None
+    assert refusal(continuity_model).command == "set_autoplay"
+
+
+def test_set_prompt_is_refused_in_the_queue_mode(model):
+    assert run(model.set_prompt(prompt="p", metadata="")) is None
+    assert refusal(model).command == "set_prompt"
+
+
+def test_the_continuity_snapshot_carries_the_prompt_and_canvas(continuity_model):
+    run(continuity_model.set_prompt(prompt="a lighthouse", metadata=""))
+    continuity_model._channel_running = True
+    state = run(continuity_model.get_state())
+    assert state.continuity is True
+    assert state.prompt == "a lighthouse"
+    assert (state.height, state.width) == (640, 1152)
+    assert "set_prompt" in state.valid_commands
+    assert "enqueue" not in state.valid_commands
+
+
+def test_stop_needs_a_running_take(continuity_model):
+    assert run(continuity_model.stop()) is None
+    assert refusal(continuity_model).command == "stop"
+    continuity_model._channel_running = True
+    run(continuity_model.stop())
+    assert continuity_model._stop_channel is True
+
+
+def test_stop_ends_the_take_and_drops_the_prompt(continuity_model):
+    # Stop must clear the held prompt, not just cut the current clip: otherwise
+    # the run loop re-anchors a fresh take on the still-held prompt and the
+    # stream never actually stops.
+    run(continuity_model.set_prompt(prompt="a harbour at dusk", metadata="m"))
+    continuity_model._channel_running = True
+    run(continuity_model.stop())
+    assert continuity_model._stop_channel is True
+    assert continuity_model._prompt == ""
+    assert continuity_model._prompt_metadata == ""
+
+
+def test_reset_drops_the_held_prompt(continuity_model):
+    run(continuity_model.set_prompt(prompt="a river", metadata=""))
+    continuity_model._channel_running = True
+    reply = run(continuity_model.reset())
+    assert reply.was_playing is True
+    assert continuity_model._prompt == ""
+    assert continuity_model._stop_channel is True
+
+
+def test_the_canvas_is_locked_while_a_prompt_drives_the_take(continuity_model):
+    run(continuity_model.set_prompt(prompt="a dune", metadata=""))
+    assert run(continuity_model.set_canvas(aspect="1:1")) is None
+    assert refusal(continuity_model).command == "set_canvas"
+    # Cleared, the canvas is selectable again.
+    run(continuity_model.reset())
+    reply = run(continuity_model.set_canvas(aspect="1:1"))
+    assert (reply.height, reply.width) == (640, 640)
+
+
+# -- runtime mode toggle (set_continuity) -----------------------------------
+
+
+def test_set_continuity_switches_an_idle_take_to_the_hard_cut_queue(continuity_model):
+    """An idle continuity session flips to the queue: length + surface follow."""
+    assert continuity_model._continuity is True
+    reply = run(continuity_model.set_continuity(enabled=False))
+    assert reply.continuity is False
+    assert continuity_model._continuity is False
+    # The queue's default length replaces the continuity length.
+    assert continuity_model._clip_frames == continuity_model.config.clip_frames
+    state = run(continuity_model.get_state())
+    assert state.continuity is False
+    assert "enqueue" in state.valid_commands
+    assert "set_prompt" not in state.valid_commands
+    # And the queue commands now actually run instead of being refused.
+    assert run(continuity_model.enqueue(prompt="a", metadata="")) is not None
+
+
+def test_set_continuity_switches_an_idle_queue_to_continuity(model):
+    """An idle queue session flips to the take: length + surface follow."""
+    assert model._continuity is False
+    reply = run(model.set_continuity(enabled=True))
+    assert reply.continuity is True
+    assert model._continuity is True
+    assert model._clip_frames == model.config.continuity_clip_frames
+    state = run(model.get_state())
+    assert state.continuity is True
+    assert "set_prompt" in state.valid_commands
+    assert "enqueue" not in state.valid_commands
+    # set_prompt, refused a moment ago in the queue, now drives the stream.
+    assert run(model.set_prompt(prompt="a misty forest", metadata="")) is not None
+
+
+def test_set_continuity_is_refused_while_a_take_runs(continuity_model):
+    run(continuity_model.set_prompt(prompt="a harbour", metadata=""))
+    continuity_model._channel_running = True
+    assert run(continuity_model.set_continuity(enabled=False)) is None
+    assert refusal(continuity_model).command == "set_continuity"
+    # The mode is unchanged: the switch never straddles a running take.
+    assert continuity_model._continuity is True
+
+
+def test_set_continuity_is_refused_while_clips_are_queued(model):
+    run(model.enqueue(prompt="a", metadata=""))
+    assert run(model.set_continuity(enabled=True)) is None
+    assert refusal(model).command == "set_continuity"
+    assert model._continuity is False
+
+
+def test_set_continuity_is_an_idempotent_ack_in_the_same_mode(continuity_model):
+    """Requesting the mode already in force is a clean no-op, not a refusal."""
+    reply = run(continuity_model.set_continuity(enabled=True))
+    assert reply.continuity is True
+    assert continuity_model._continuity is True
+    assert refusal(continuity_model) is None
+
+
+def test_the_queue_serve_loop_hands_off_when_the_mode_flips(model):
+    """`set_continuity(true)` while idle lets `_serve` return so run() re-dispatches."""
+
+    async def main():
+        model.connected.set()
+        model._continuity = True
+        # If the guard did not pick up the flip, this would spin until timeout.
+        await asyncio.wait_for(model._serve(), timeout=1.0)
+
+    asyncio.run(main())
+
+
+def test_the_continuity_serve_loop_hands_off_when_the_mode_flips(continuity_model):
+    """`set_continuity(false)` while idle lets `_serve_continuity` return likewise."""
+
+    async def main():
+        continuity_model.connected.set()
+        continuity_model._continuity = False
+        await asyncio.wait_for(continuity_model._serve_continuity(), timeout=1.0)
+
+    asyncio.run(main())
+

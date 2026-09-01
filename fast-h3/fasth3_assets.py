@@ -51,6 +51,19 @@ class FastH3Config:
     generation_queue_size: int
     warmup_aspects: tuple[str, ...]
     warmup_frames: tuple[int, ...]
+    # Resolution tier the canvas resolves at. 640 (the default) trades pixels
+    # for a proportionally faster build, which is the headroom continuity's
+    # gap-free chain needs; 768 is the measured full-quality tier.
+    canvas_short_edge: int
+    # Continuity mode: off is the client-driven hard-cut queue above; on is a
+    # self-continuing single-prompt channel that FL2VA-anchors each clip on the
+    # previous one's last frame and crossfades the boundary into one stream.
+    continuity: bool
+    # The clip length continuity holds to (shorter than the queue default: a
+    # single-still FL2VA anchor re-anchors more often and drifts less), and the
+    # crossfade overlap width in frames. Both are ignored when continuity is off.
+    continuity_clip_frames: int
+    seam_frames: int
     inference: dict[str, Any]
     runtime: dict[str, Any]
 
@@ -92,6 +105,26 @@ def load_config(config_path: Path | None) -> FastH3Config:
         float(inference.get("clip_seconds", clip_plan.MAX_SECONDS))
     )
 
+    # Absent selects the trained 768 tier, so a config without the key — every
+    # hard-cut deployment — is unchanged; the shipped continuity config sets 640.
+    try:
+        canvas_short_edge = clip_plan.resolve_short_edge(inference.get("canvas_short_edge"))
+    except ValueError as error:
+        raise ValueError(f"inference.canvas_short_edge is invalid: {error}") from None
+
+    continuity = bool(inference.get("continuity", False))
+    continuity_clip_frames = clip_plan.frames_for_seconds(
+        float(inference.get("continuity_clip_seconds", clip_plan.MIN_SECONDS))
+    )
+    seam_frames = int(inference.get("seam_frames", 12))
+    if seam_frames < 0:
+        raise ValueError(f"inference.seam_frames must not be negative, got {seam_frames}")
+    if 2 * seam_frames > continuity_clip_frames:
+        raise ValueError(
+            f"inference.seam_frames ({seam_frames}) is too wide: two seam overlaps "
+            f"must fit one continuity clip ({continuity_clip_frames} frames)."
+        )
+
     return FastH3Config(
         aspect=aspect,
         clip_frames=clip_frames,
@@ -102,7 +135,14 @@ def load_config(config_path: Path | None) -> FastH3Config:
         queue_size=queue_size,
         generation_queue_size=generation_queue_size,
         warmup_aspects=tuple(str(a) for a in (inference.get("warmup_aspects") or [aspect])),
-        warmup_frames=_parse_warmup_lengths(inference.get("warmup_lengths"), clip_frames),
+        warmup_frames=_parse_warmup_lengths(
+            inference.get("warmup_lengths"),
+            continuity_clip_frames if continuity else clip_frames,
+        ),
+        canvas_short_edge=canvas_short_edge,
+        continuity=continuity,
+        continuity_clip_frames=continuity_clip_frames,
+        seam_frames=seam_frames,
         inference=inference,
         runtime=runtime,
     )

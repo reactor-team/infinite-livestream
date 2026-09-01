@@ -27,13 +27,46 @@ _LATENTS_PER_CHUNK = 5
 _MIN_DURATION = 5.0
 _MAX_DURATION = 15.0
 
-# Canvas rules: the short edge is fixed, total area is capped, and both sides
-# must land on a multiple of 32.
+# Canvas rules: the short edge sets the resolution tier, total area is capped,
+# and both sides must land on a multiple of 32. ``_SHORT_EDGE`` is the
+# checkpoint's trained short edge and the default; a deployment can select a
+# lower tier (e.g. 640) through ``inference.canvas_short_edge`` — a smaller
+# clip builds proportionally faster, which is what keeps a continuously fed
+# stream ahead of playout at the cost of pixels. The value flows in as the
+# ``short_edge`` argument below; the module default reproduces the measured
+# 768 profile so every zero-argument caller and the upstream-drift test are
+# unaffected.
 _SHORT_EDGE = 768
 _MAX_PIXELS = 768 * 1344
 _CANVAS_MULTIPLE = 32
 _MIN_ASPECT = 1 / 4
 _MAX_ASPECT = 4
+
+# The resolution tier a deployment may select. The floor keeps a canvas large
+# enough for the checkpoint to stay coherent; the ceiling is the trained short
+# edge, above which the area cap and compile shapes leave the measured profile.
+MIN_SHORT_EDGE = 256
+MAX_SHORT_EDGE = _SHORT_EDGE
+
+
+def resolve_short_edge(short_edge: int | None) -> int:
+    """Validate a configured short edge, or fall back to the trained default.
+
+    A tier must be a multiple of 32 (both canvas sides are) inside
+    ``[MIN_SHORT_EDGE, MAX_SHORT_EDGE]``; ``None`` selects the 768 default.
+    """
+    if short_edge is None:
+        return _SHORT_EDGE
+    edge = int(short_edge)
+    if edge % _CANVAS_MULTIPLE != 0:
+        raise ValueError(
+            f"canvas short edge must be a multiple of {_CANVAS_MULTIPLE}, got {edge}"
+        )
+    if not MIN_SHORT_EDGE <= edge <= MAX_SHORT_EDGE:
+        raise ValueError(
+            f"canvas short edge must be between {MIN_SHORT_EDGE} and {MAX_SHORT_EDGE}, got {edge}"
+        )
+    return edge
 
 
 def align_frames(frames: int) -> int:
@@ -98,12 +131,15 @@ def seconds_for_frames(frames: int) -> float:
     return frames / FPS
 
 
-def canvas_for_aspect(aspect_width: float, aspect_height: float) -> tuple[int, int]:
+def canvas_for_aspect(
+    aspect_width: float, aspect_height: float, short_edge: int = _SHORT_EDGE
+) -> tuple[int, int]:
     """Resolve an aspect ratio to a `(height, width)` the checkpoint accepts.
 
-    Mirrors FastVideo's ``resolve_canvas_size``: pin the short edge to 768,
-    shrink to the area cap if the result is too wide, then round both sides to a
-    multiple of 32.
+    Mirrors FastVideo's ``resolve_canvas_size``: pin the short edge to
+    ``short_edge`` (768 by default, the trained tier), shrink to the area cap if
+    the result is too wide, then round both sides to a multiple of 32. Passing a
+    lower ``short_edge`` selects a lower-resolution tier of the same aspect.
     """
     if aspect_width <= 0 or aspect_height <= 0:
         raise ValueError(f"aspect must be positive, got {aspect_width}:{aspect_height}")
@@ -111,10 +147,11 @@ def canvas_for_aspect(aspect_width: float, aspect_height: float) -> tuple[int, i
     if not _MIN_ASPECT <= ratio <= _MAX_ASPECT:
         raise ValueError(f"aspect ratios run from 1:4 to 4:1, got {aspect_width}:{aspect_height}")
 
+    edge = resolve_short_edge(short_edge)
     if ratio >= 1:
-        width, height = _SHORT_EDGE * ratio, float(_SHORT_EDGE)
+        width, height = edge * ratio, float(edge)
     else:
-        width, height = float(_SHORT_EDGE), _SHORT_EDGE / ratio
+        width, height = float(edge), edge / ratio
     area = width * height
     if area > _MAX_PIXELS:
         scale = (_MAX_PIXELS / area) ** 0.5
@@ -136,19 +173,22 @@ _ASPECT_RATIOS: dict[str, tuple[int, int]] = {
 }
 
 
-def canvas_for_choice(aspect: str) -> tuple[int, int]:
-    """Resolve one of ``ASPECT_CHOICES`` to `(height, width)`."""
+def canvas_for_choice(aspect: str, short_edge: int = _SHORT_EDGE) -> tuple[int, int]:
+    """Resolve one of ``ASPECT_CHOICES`` to `(height, width)` at ``short_edge``."""
     try:
         ratio = _ASPECT_RATIOS[aspect]
     except KeyError:
         raise ValueError(f"unknown aspect {aspect!r}; choose one of {list(ASPECT_CHOICES)}") from None
-    return canvas_for_aspect(*ratio)
+    return canvas_for_aspect(*ratio, short_edge=short_edge)
 
 
 __all__ = [
     "ASPECT_CHOICES",
     "FPS",
     "MAX_FRAMES",
+    "MAX_SHORT_EDGE",
+    "MIN_SHORT_EDGE",
+    "resolve_short_edge",
     "MAX_SECONDS",
     "MAX_SECONDS_PUBLISHED",
     "MIN_FRAMES",
