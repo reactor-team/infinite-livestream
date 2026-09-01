@@ -43,11 +43,14 @@ def valid_commands(
         commands = ["get_state", "reset", "set_prompt", "set_seed"]
         if playing:
             commands.append("stop")
-        elif not prompt_set:
-            # The canvas is still free until a prompt fixes it, and while idle
-            # the client may switch this session to the hard-cut queue.
-            commands.append("set_canvas")
-            commands.append("set_continuity")
+        else:
+            # Before the take runs, the client can seed it from an uploaded
+            # image (I2V); the canvas is still free until a prompt fixes it.
+            commands.append("set_seed_image")
+            if not prompt_set:
+                commands.append("set_canvas")
+                # Idle: the client may switch this session to the hard-cut queue.
+                commands.append("set_continuity")
         return sorted(commands)
 
     commands = list(_ALWAYS)

@@ -1054,6 +1054,7 @@ EXPECTED_COMMANDS = {
     "set_continuity": "ContinuityAccepted",
     "set_prompt": "PromptAccepted",
     "set_seed": "SeedAccepted",
+    "set_seed_image": "SeedImageAccepted",
     "stop": None,
 }
 
@@ -1074,6 +1075,7 @@ EXPECTED_MESSAGES = {
     "prompt_accepted",
     "queue_update",
     "seed_accepted",
+    "seed_image_accepted",
     "session_reset",
     "state_update",
 }
@@ -1082,7 +1084,7 @@ EXPECTED_MESSAGES = {
 # name the message a client will actually receive.
 EXPECTED_REJECTIONS = (
     "enqueue", "move", "play", "pop", "stop", "set_canvas", "set_prompt",
-    "set_continuity",
+    "set_seed_image", "set_continuity",
 )
 
 # The struct every clip-referencing message embeds, and its JSON types.
@@ -1492,6 +1494,8 @@ def test_continuity_offers_the_prompt_surface_not_the_queue():
         playout_queued=0, continuity=True, prompt_set=False,
     )
     assert "set_prompt" in idle and "set_canvas" in idle
+    # The take can be seeded from an uploaded image (I2V) before it starts.
+    assert "set_seed_image" in idle
     # Idle: the session may be switched to the hard-cut queue.
     assert "set_continuity" in idle
     assert not ({"enqueue", "play", "move", "pop", "get_queue", "set_autoplay"} & set(idle))
@@ -1501,9 +1505,10 @@ def test_continuity_offers_the_prompt_surface_not_the_queue():
         playout_queued=0, continuity=True, prompt_set=True,
     )
     assert "stop" in running
-    # The canvas is fixed and the mode can no longer be switched once the
-    # take runs.
+    # The canvas is fixed, a seed can no longer be set, and the mode can no
+    # longer be switched once the take runs.
     assert "set_canvas" not in running
+    assert "set_seed_image" not in running
     assert "set_continuity" not in running
 
 
@@ -1777,3 +1782,138 @@ def test_the_continuity_serve_loop_hands_off_when_the_mode_flips(continuity_mode
 
     asyncio.run(main())
 
+
+# -- seeding the take from an uploaded image, I2V (PR#2) --------------------
+#
+# The pure decoder is exercised on real bytes; the handler is exercised with a
+# constructed UploadedFile, so both the decode and the seed lifecycle run on a
+# laptop without a GPU. Video is deliberately unsupported: a client extracts the
+# frame it wants and sends it as an image.
+
+
+def _png_bytes(rgb: tuple[int, int, int], size=(48, 64)) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, rgb).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _upload(data: bytes, mime_type: str, name: str):
+    from reactor_runtime import UploadedFile
+
+    return UploadedFile(name=name, mime_type=mime_type, data=data)
+
+
+def test_the_decoder_reads_a_still_image():
+    import fasth3_image as image
+
+    frame = image.decode_seed_frame(_png_bytes((10, 120, 240)), "image/png", "s.png")
+    # PIL size is (width, height); the array comes back (height, width, 3).
+    assert frame.shape == (64, 48, 3) and frame.dtype == np.uint8
+
+
+def test_the_decoder_rejects_video_with_a_pointer_to_the_image_path():
+    import fasth3_image as image
+
+    # A video is refused before any decode, by mime and by extension, with a
+    # message that names the supported path (send a frame as an image).
+    for mime, name in [("video/mp4", "clip.mp4"), ("", "clip.mov")]:
+        with pytest.raises(image.SeedDecodeError, match="as an image"):
+            image.decode_seed_frame(b"\x00\x00\x00\x18ftyp", mime, name)
+
+
+def test_the_decoder_refuses_junk():
+    import fasth3_image as image
+
+    for data, mime, name in [
+        (b"", "image/png", "a.png"),
+        (b"not-an-image", "image/png", "a.png"),
+        (b"hello", "text/plain", "a.txt"),
+    ]:
+        with pytest.raises(image.SeedDecodeError):
+            image.decode_seed_frame(data, mime, name)
+
+
+def test_set_seed_image_fits_an_image_to_the_canvas(continuity_model):
+    reply = run(
+        continuity_model.set_seed_image(
+            image=_upload(_png_bytes((200, 30, 30)), "image/png", "still.png")
+        )
+    )
+    assert reply.filename == "still.png"
+    # Fitted to the 640 tier's 16:9 canvas the fixture loads.
+    assert (reply.height, reply.width) == continuity_model._canvas()
+    seed = continuity_model._seed_anchor
+    assert seed is not None and seed.dtype == np.uint8
+    assert seed.shape == (reply.height, reply.width, 3)
+
+
+def test_set_seed_image_refuses_a_video_upload(continuity_model):
+    assert (
+        run(
+            continuity_model.set_seed_image(
+                image=_upload(b"\x00\x00\x00\x18ftyp", "video/mp4", "clip.mp4")
+            )
+        )
+        is None
+    )
+    assert refusal(continuity_model).command == "set_seed_image"
+    assert continuity_model._seed_anchor is None
+
+
+def test_set_seed_image_refuses_a_non_image_upload(continuity_model):
+    assert (
+        run(
+            continuity_model.set_seed_image(
+                image=_upload(b"junk", "application/pdf", "a.pdf")
+            )
+        )
+        is None
+    )
+    assert refusal(continuity_model).command == "set_seed_image"
+    assert continuity_model._seed_anchor is None
+
+
+def test_set_seed_image_is_refused_while_a_take_runs(continuity_model):
+    continuity_model._channel_running = True
+    assert (
+        run(
+            continuity_model.set_seed_image(
+                image=_upload(_png_bytes((1, 2, 3)), "image/png", "s.png")
+            )
+        )
+        is None
+    )
+    assert refusal(continuity_model).command == "set_seed_image"
+
+
+def test_set_seed_image_is_refused_in_the_queue_mode(model):
+    assert (
+        run(model.set_seed_image(image=_upload(_png_bytes((1, 2, 3)), "image/png", "s.png")))
+        is None
+    )
+    assert refusal(model).command == "set_seed_image"
+
+
+def test_reset_and_stop_drop_the_seed(continuity_model):
+    run(
+        continuity_model.set_seed_image(
+            image=_upload(_png_bytes((9, 9, 9)), "image/png", "s.png")
+        )
+    )
+    assert continuity_model._seed_anchor is not None
+    run(continuity_model.reset())
+    assert continuity_model._seed_anchor is None
+
+    # And a stop mid-take clears any seed too.
+    run(
+        continuity_model.set_seed_image(
+            image=_upload(_png_bytes((9, 9, 9)), "image/png", "s.png")
+        )
+    )
+    continuity_model._channel_running = True
+    run(continuity_model.stop())
+    assert continuity_model._seed_anchor is None

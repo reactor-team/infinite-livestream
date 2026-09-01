@@ -5,12 +5,13 @@ model:
   name: fast-h3
   # Bare semver, no `v` prefix — the platform's release tag format; the
   # registration validator refuses a prefixed one.
-  version: 0.6.0
+  version: 0.6.1
   description: |
     Generate video with synchronized audio from MiniMax-H3 (35B), distilled by
     FastVideo to four transformer forwards with 90% sparse video attention. Two
     modes: a continuous single-prompt take that chains and crossfades clips into
-    one uninterrupted stream (`set_prompt`), and a clip queue that builds
+    one uninterrupted stream (`set_prompt`), optionally seeded from an uploaded
+    image (`set_seed_image`, image-to-video), and a clip queue that builds
     enqueued prompts in order and plays any built clip on demand
     (`enqueue`/`play`), holding on black in between.
   # Eight Blackwell GPUs: the count that builds faster than the stream plays

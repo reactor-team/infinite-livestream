@@ -16,7 +16,11 @@ description: Full context for the fast-h3 model in this repo — what FastH3/Min
   opener's, every boundary crossfaded in linear light. One prompt → one
   uninterrupted stream until `stop` or a new `set_prompt`. Shipped at the 640
   resolution tier, where a 5.167 s clip builds in ~3.3 s on 8 B200s — under the
-  playout window, so the chain never starves.
+  playout window, so the chain never starves. The take can be **seeded** from an
+  uploaded image (`set_seed_image`, image-to-video); the seed rides the same
+  FL2VA anchor path, so the generator's VAE round-trips it onto the model's
+  distribution. (To continue from a video, a client sends the frame it wants as
+  an image — the same anchor path, no in-process video decoder.)
 - **Queue (off)** — a **clip queue with a player**: clients `enqueue`
   prompt-driven generations, the model builds them ahead of time, nothing
   reaches the tracks until `play` (or autoplay), hard cut between clips. The
