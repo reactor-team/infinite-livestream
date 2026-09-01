@@ -18,15 +18,38 @@ def valid_commands(
     generation_queued: int,
     generation_capacity: int,
     playout_queued: int,
+    continuity: bool = False,
+    prompt_set: bool = False,
 ) -> list[str]:
     """Name every command the session would accept in this state.
+
+    The two modes are disjoint surfaces. Continuity is the single continuous
+    take driven by `set_prompt`; the queue is the clip-at-a-time channel with
+    `enqueue`/`play`/`move`/`pop`. `state_update.valid_commands` carries the
+    result, so a frontend never offers a command the other mode owns.
 
     Args:
         playing: A clip is streaming on the output tracks.
         generation_queued: Clips waiting in the generation queue.
         generation_capacity: Most clips the generation queue holds.
         playout_queued: Built clips waiting in the playout queue.
+        continuity: The model is in continuity mode.
+        prompt_set: Continuity has a held prompt (the stream is armed or running).
     """
+    if continuity:
+        # The take follows one prompt at one config-fixed length; seed records a
+        # value; the canvas is fixed while a prompt drives the stream, exactly as
+        # it is while the queue holds clips.
+        commands = ["get_state", "reset", "set_prompt", "set_seed"]
+        if playing:
+            commands.append("stop")
+        elif not prompt_set:
+            # The canvas is still free until a prompt fixes it, and while idle
+            # the client may switch this session to the hard-cut queue.
+            commands.append("set_canvas")
+            commands.append("set_continuity")
+        return sorted(commands)
+
     commands = list(_ALWAYS)
     if generation_queued < generation_capacity:
         commands.append("enqueue")
@@ -43,6 +66,8 @@ def valid_commands(
         # empty.
         if generation_queued == 0 and playout_queued == 0:
             commands.append("set_canvas")
+            # Idle: the client may switch this session to continuity mode.
+            commands.append("set_continuity")
     return sorted(commands)
 
 

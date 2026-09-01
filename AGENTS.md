@@ -142,13 +142,28 @@ Director being the queues' only writer (viewer worker, idle filler, and
 - **fast-h3 deliberately subclasses `ReactorModel` with its own `run()` loop**
   (not `ReactorPipeline`): its unit of work is a whole clip, and command
   handlers must answer while a clip builds or plays. Do not "normalize" this.
-- **File seams are fixed.** `fasth3.py` owns commands + the playout loop;
-  `fasth3_types.py` everything a client sees; `fasth3_queue.py` the bounded
-  queue; `fasth3_backend.py` the FastVideo engine + worker thread;
-  `fasth3_assets.py` config parsing and weights validation (the only reader
-  of `fasth3.yaml`); `fasth3_clip_plan.py` pure clip geometry;
-  `fasth3_session_rules.py` which commands each state accepts. New code goes
-  in the seam that owns it. No `__init__.py` — modules import flat.
+- **File seams are fixed.** `fasth3.py` owns commands + both run loops (the
+  queue's playout and continuity's held-prompt take); `fasth3_types.py`
+  everything a client sees; `fasth3_queue.py` the bounded queue;
+  `fasth3_backend.py` the FastVideo engine + worker thread, and continuity's
+  post-decode pipeline that runs on it (FL2VA anchor, GPU exposure lock, GPU
+  seam blend); `fasth3_seam.py` the pure-numpy exposure lock and linear-light
+  crossfade (no torch); `fasth3_assets.py` config parsing and weights validation
+  (the only reader of `fasth3.yaml`); `fasth3_clip_plan.py` pure clip geometry
+  and resolution tiers; `fasth3_session_rules.py` which commands each state
+  accepts, per mode. New code goes in the seam that owns it. No `__init__.py` —
+  modules import flat.
+- **Two modes, one class, disjoint surfaces.** `inference.continuity` (default
+  on) selects a continuous single-prompt take (`set_prompt`, FL2VA-chained,
+  crossfaded into one stream) over the client-driven hard-cut queue
+  (`enqueue`/`play`). Both live in `FastH3`; `run()` dispatches on the
+  per-session `self._continuity` flag (seeded from the config), and the modes
+  share nothing but the engine, tracks, and geometry.
+  `state_update.valid_commands` names the live surface. `set_continuity` flips
+  the flag at runtime while the session is idle; `run()`/`_serve*` re-dispatch
+  on the change, so read `self._continuity`, never `self.config.continuity`, in
+  any per-session path. Keep the queue path byte-for-byte unchanged when
+  continuity is off — the streaming client drives the queue.
 - **Typed contracts.** Every `@event` handler declares and returns a concrete
   `ModelMessage` (or `None`); a refusal broadcasts `command_error` and
   returns bodyless. State-changing commands also broadcast a full

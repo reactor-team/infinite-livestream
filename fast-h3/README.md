@@ -163,19 +163,27 @@ size in force.
 
 ## Commands
 
+The two modes offer disjoint surfaces; `state_update.valid_commands` names the
+live set. `set_prompt` is continuity-only;
+`enqueue`/`play`/`move`/`pop`/`get_queue`/`set_autoplay` are queue-only. The rest
+are shared. `set_continuity` is the runtime toggle between the two — offered
+while the session is idle so a client picks the mode without a config change.
+
 | Command | Parameters | Effect | Rejected when |
 |---|---|---|---|
-| `enqueue` | `prompt` (≤ 800 chars), `metadata` (≤ 2000 chars), `seed` (optional, ≥ 0), `seconds` (optional, 5.167–14.375), `position` (optional, ≥ 0) | Enters the generation queue at `position` (0 = next build; omitted = the back); replies `clip_queued` with the full `ClipInfo`. Without a seed the session's advancing default is used; without `seconds` the session's default length. | generation queue full, empty prompt |
+| `set_prompt` | `prompt` (≤ 800 chars), `metadata` (≤ 2000 chars) | **Continuity mode.** Sets the prompt the continuous take follows; the first starts the take, a later one re-anchors it. Replies `prompt_accepted`. | empty prompt, or the model runs the queue |
+| `enqueue` | `prompt` (≤ 800 chars), `metadata` (≤ 2000 chars), `seed` (optional, ≥ 0), `seconds` (optional, 5.167–14.375), `position` (optional, ≥ 0) | **Queue mode.** Enters the generation queue at `position` (0 = next build; omitted = the back); replies `clip_queued` with the full `ClipInfo`. Without a seed the session's advancing default is used; without `seconds` the session's default length. | generation queue full, empty prompt, or the model runs continuity |
 | `move` | `clip_id` (UUID), `position` (≥ 0) | Repositions the clip within whichever queue holds it; 0 = front, clamped to the back. Replies `clip_moved` with the queue's name and the landing position. | unknown or missing id |
 | `play` | `clip_id` (optional UUID) | Streams the playout queue's front clip, or the named one. Emits `clip_started` as frames begin. | already playing, unknown id, clip still generating |
 | `pop` | `clip_id` (UUID) | Removes that clip from whichever queue holds it, freeing its slot; a build in flight for it is discarded. Replies `clip_popped`. | unknown or missing id |
-| `stop` | — | Cuts the playing clip to black; both queues are untouched. With autoplay on, acts as a skip. Emits `clip_stopped`. | nothing playing |
+| `stop` | — | Cuts the stream to black: the playing clip in queue mode (queues untouched; a skip with autoplay on, emits `clip_stopped`), or the whole continuity take (drops the held prompt back to idle). | nothing playing |
 | `get_queue` | — | Replies with both queues — the same payload as `queue_update`. | — |
 | `set_autoplay` | `enabled` (bool) | On, the playout queue's front clip starts on its own whenever nothing is playing. Off (default), the stream holds until `play`. Replies `autoplay_accepted`. | — |
 | `set_clip_seconds` | `seconds` (5.167–14.375) | Default length for enqueues that carry no `seconds`, snapped to what the model can produce; the effective value returns in `clip_length_accepted`. | — |
 | `set_seed` | `seed` (≥ 0) | Default seed for enqueues that carry none; each such enqueue advances it by one. Replies `seed_accepted`. | — |
 | `set_canvas` | `aspect` (`16:9`, `1:1`, `9:16`, `4:3`) | Video size for the session. Replies `canvas_accepted`. | clips queued or playing, unsupported aspect |
-| `reset` | — | Drops both queues, cuts any playing clip, restores every default. Replies `session_reset`. | — |
+| `set_continuity` | `enabled` (bool) | Switches this session between the continuous take (`true`, the config default) and the hard-cut queue (`false`) at runtime; the config sets the starting mode and `reset` keeps the chosen one. Replies `continuity_accepted`; `state_update.valid_commands` then carries the other mode's surface. | not idle — a clip playing/queued or a prompt held |
+| `reset` | — | Drops both queues, cuts any playing clip, restores every default (keeping the current mode). Replies `session_reset`. | — |
 | `get_state` | — | Replies with the full `state_update` snapshot. | — |
 
 A rejected command has no effect and is answered by a broadcast
@@ -199,6 +207,8 @@ A rejected command has no effect and is answered by a broadcast
 | `seed_accepted` | the caller | Reply to `set_seed`. |
 | `autoplay_accepted` | the caller | Reply to `set_autoplay`. |
 | `canvas_accepted` | the caller | Reply to `set_canvas`. Carries the exact pixel size. |
+| `prompt_accepted` | the caller | Reply to `set_prompt` (continuity). Carries the prompt the take now follows. |
+| `continuity_accepted` | the caller | Reply to `set_continuity`. Carries the mode now in force. |
 | `session_reset` | the caller | Reply to `reset`. Says how many clips were dropped. |
 
 ## Session lifecycle
@@ -260,20 +270,58 @@ instead of re-deriving these rules.
 Playout is a strict 24 fps metronome and the audio is sample-clocked against
 the same rate, so the two tracks stay locked for the length of any clip.
 
-## Clip boundaries are hard cuts
+## Two modes: continuous take, or hard-cut queue
 
-Every clip is generated independently. There is no continuity of subject,
-framing, or voice from one clip to the next, even with identical prompts — and
-the stream holds on black between plays. This checkpoint has no continuation
-path, and inventing one is not an adapter's decision. It is why
-`runtime.recording` is left disabled: a recording would carry those cuts too.
+The model runs one of two modes, fixed at load by `inference.continuity`.
+
+**Continuity (`continuity: true`, the shipped default)** is one continuous
+take. `set_prompt` holds a prompt and the model builds clips back to back
+forever, each after the first FL2VA-anchored on the previous clip's last frame,
+its exposure locked to the opener's, and every boundary crossfaded in linear
+light — so subject, framing and voice carry across as one uninterrupted stream
+until `stop` or a new `set_prompt`. A new `set_prompt` re-anchors: the next clip
+opens fresh on the new prompt and the held seam tail dissolves the old scene
+into it. There is no queue and no `play`; the take starts the moment a prompt is
+set and an audience is connected. The FL2VA and Ref2VA conditioning this uses
+were not distilled into the checkpoint, so the anchored continuation is a
+best-effort carry rather than a trained one — good enough to dissolve a seam,
+not a guaranteed identity lock.
+
+**Queue (`continuity: false`)** is the clip-at-a-time channel described above:
+every clip generated independently, `enqueue`d and `play`ed, the stream holding
+on black between plays with a hard cut at each boundary — no continuity of
+subject, framing, or voice, even with identical prompts. `runtime.recording` is
+left disabled because a recording would carry those cuts. The streaming client
+drives this mode.
+
+The two are **disjoint command surfaces** (`fasth3_session_rules.py`):
+continuity offers `set_prompt`/`stop`/`reset`/`set_seed`/`set_canvas`, the queue
+offers `enqueue`/`play`/`move`/`pop`/… — `state_update.valid_commands` names the
+live set, and the other mode's commands are refused. Everything else (tracks,
+canvas, seed, clip length, warm-up, the engine profile) is shared.
+
+The mode is **config-defaulted but runtime-switchable**: `inference.continuity`
+sets the starting mode, and `set_continuity` flips a session between the two
+while it is idle (nothing playing, queued, or a prompt held — the same gate as
+`set_canvas`), so a client chooses hard cuts or continuity per session without a
+redeploy. `reset` keeps whichever mode is in force. The switch is offered only
+while idle so no clip or take straddles it; the run loop, parked in the current
+mode's idle branch, returns and re-dispatches to the other on the flip.
 
 The geometry it accepts is narrow, and [`fasth3_clip_plan.py`](./fasth3_clip_plan.py)
 encodes it: 24 fps, a frame count of the form `17n + 5`, a duration between 5
-and 15 seconds, a short edge of 768, at most 768×1344 pixels, and both sides a
-multiple of 32. The duration cap has a sharp edge — 15.0 s is 360 frames, which
-aligns *up* to 362 (15.083 s) and is then rejected, so **the longest clip this
-model can make is 345 frames, 14.375 s**.
+and 15 seconds, at most 768×1344 pixels, and both sides a multiple of 32. The
+duration cap has a sharp edge — 15.0 s is 360 frames, which aligns *up* to 362
+(15.083 s) and is then rejected, so **the longest clip this model can make is 345
+frames, 14.375 s**.
+
+The **short edge is a selectable resolution tier**, `inference.canvas_short_edge`
+(a multiple of 32, 256–768), and every `set_canvas` aspect resolves at it. 768 is
+the trained tier every published single-clip number was measured at; 640 (the
+shipped continuity default) makes a 16:9 clip 1152×640 — ~2.9% fewer pixels,
+built proportionally faster, which is the headroom that keeps continuity's
+back-to-back chain ahead of playout. The default is 768 when the key is absent,
+so a queue deployment is unchanged.
 
 ## Determinism
 
@@ -323,8 +371,9 @@ tree arrives through `requirements.txt` and an upgrade is a one-line bump.
 | `fasth3_queue.py` | The bounded clip queue and its entries |
 | `fasth3_backend.py` | The FastVideo engine, its worker thread, warm-up, audio conversion |
 | `fasth3_assets.py` | Config parsing and weights-bundle validation |
-| `fasth3_clip_plan.py` | Clip geometry: valid lengths, frame counts, canvases |
-| `fasth3_session_rules.py` | Which commands each session state accepts |
+| `fasth3_clip_plan.py` | Clip geometry: valid lengths, frame counts, canvases, resolution tiers |
+| `fasth3_seam.py` | Continuity's pure-numpy exposure lock and linear-light seam crossfade (no torch) |
+| `fasth3_session_rules.py` | Which commands each session state accepts, per mode |
 | `fasth3.yaml` | `inference:` the recipe, queue size and warm-up plan, `runtime:` weight layout and engine shape |
 | `reactor.yaml` | The manifest: identity, version, resources, runtime, image build |
 | `sitecustomize.py` | Interpreter-wide fixes in every container process, spawned engine workers included (via `PYTHONPATH=/app`): raises dynamo's recompile limits, widens the VSA kernel's device gate to every built arch |

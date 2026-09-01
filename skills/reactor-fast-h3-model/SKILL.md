@@ -5,11 +5,29 @@ description: Full context for the fast-h3 model in this repo — what FastH3/Min
 
 # The fast-h3 model: full working context
 
-`fast-h3/` turns the FastH3 video model into a **clip queue with a player**,
-served by the open-source [Reactor Runtime](https://github.com/reactor-team/reactor-runtime).
-Clients enqueue prompt-driven generations, the model builds them ahead of
-time, and nothing reaches the media tracks until asked (or autoplay is on).
-This file is the context a new agent needs; the per-file detail lives in
+`fast-h3/` serves the FastH3 video model in one of **two modes**, defaulted by
+`inference.continuity` and switchable per-session at runtime via `set_continuity`
+(while idle), over the open-source
+[Reactor Runtime](https://github.com/reactor-team/reactor-runtime):
+
+- **Continuity (default on)** — one continuous take. `set_prompt` holds a prompt
+  and the model builds clips back to back forever, each after the first
+  FL2VA-anchored on the previous clip's last frame, its exposure locked to the
+  opener's, every boundary crossfaded in linear light. One prompt → one
+  uninterrupted stream until `stop` or a new `set_prompt`. Shipped at the 640
+  resolution tier, where a 5.167 s clip builds in ~3.3 s on 8 B200s — under the
+  playout window, so the chain never starves.
+- **Queue (off)** — a **clip queue with a player**: clients `enqueue`
+  prompt-driven generations, the model builds them ahead of time, nothing
+  reaches the tracks until `play` (or autoplay), hard cut between clips. The
+  streaming client drives this mode.
+
+Both live in one `FastH3` class with disjoint command surfaces
+(`state_update.valid_commands` names the live set). The mode is a per-session
+flag (`self._continuity`, seeded from the config): `set_continuity` flips it
+while the session is idle and `run()`/`_serve*` re-dispatch to the other loop,
+so a client picks hard cuts or continuity without a redeploy. This file is the
+context a new agent needs; the per-file detail lives in
 [`fast-h3/README.md`](../../fast-h3/README.md) and the code's own docstrings.
 
 ## 1. The underlying model
@@ -21,11 +39,15 @@ to **four transformer forwards**, plus VSA-H3 sparse video attention at 90%
 sparsity. Facts that shape everything downstream:
 
 - **Fully bidirectional, not autoregressive.** One denoise covers the whole
-  clip's token sequence at once. There is no KV cache, no rollout, no
-  continuation: every clip is an independent sample, and clip boundaries are
-  hard cuts in both picture and sound. Only text-to-audio-video was
-  distilled (the base model's first/last-frame and reference conditioning
-  were not).
+  clip's token sequence at once — no KV cache, no rollout. Every clip is an
+  independent sample; the queue mode leaves the boundaries as hard cuts. Only
+  text-to-audio-video was distilled (the base model's first/last-frame and
+  reference conditioning were not), so continuity's FL2VA anchoring is an
+  **undistilled** carry: it seeds the next clip with the previous last frame and
+  the seam crossfade dissolves the boundary, but it is a best-effort continuation
+  the checkpoint was not trained for, not an identity lock. Exposure is held
+  stable across the chain by a float64-mean colour lock (a float32 clip-mean
+  saturates the mantissa at production sizes and blows highlights to white).
 - **One packed sequence, video + audio + text.** The H3-Omni-Transformer is a
   33B dense single-stream DiT over a packed multimodal sequence with 3D
   RoPE; audio is generated jointly (native stereo, decoded by a separate
