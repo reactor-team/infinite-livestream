@@ -1,9 +1,8 @@
-# Infinite Livestream FastH3 frontend
+# Browser console
 
-This Reactor-branded Next.js application adapts the Reactor Cookbook FastH3
-demo to this repository's two-queue model contract. The official Reactor
-lockup anchors the application header. It plays synchronized WebRTC video and
-audio and renders complete generation/playout queue state.
+This Next.js application adapts the Reactor Cookbook FastH3 demo to this
+repository's two-queue model contract. It plays synchronized WebRTC video and
+audio and shows both the generation and playout queues.
 
 The interface supports two safe operating modes:
 
@@ -19,24 +18,51 @@ Metadata written in control mode uses the same scene-group shape as
 `streaming-client/group_tag.py`, so the streaming overlay and logs can describe
 web-submitted clips if another client later reads them.
 
-## Local development
+## Run locally
 
-Start FastH3 on port 8080, then:
+Start the model from the repository root:
 
 ```sh
+cd fast-h3
+reactor build
+reactor run
+```
+
+In another terminal, start the frontend:
+
+```sh
+cd frontend
 cp .env.example .env
 pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Open <http://localhost:3000>. To monitor an already-running local livestream,
-copy its Reactor session id into the connection field or set
-`REACTOR_SESSION_ID` before starting Next.js.
+Open <http://localhost:3000>. Leave the session id blank to create a control
+session. A local Runtime serves one session at a time, so if
+`streaming-client` is already connected, enter its session id to join it in
+read-only monitor mode; trying to create a second session returns HTTP 409.
+`REACTOR_SESSION_ID` can set the field's initial value.
 
 The browser connects through the same-origin `/reactor` path. Next.js proxies
-that path to `REACTOR_INTERNAL_URL` (default `http://localhost:8080`), so remote
-development only needs to forward port 3000 and never exposes the Reactor
-runtime directly.
+that path to `REACTOR_INTERNAL_URL`, which defaults to
+`http://localhost:8080`. This keeps the Runtime's HTTP signaling endpoint
+private.
+
+## Run on a remote GPU server
+
+The Next.js proxy carries signaling, but WebRTC media does not pass through
+that proxy. The Runtime must advertise an ICE server the browser can reach.
+If TURN-over-TCP listens on server loopback port 8080, forward both ports:
+
+```sh
+ssh -N \
+  -L 3000:127.0.0.1:3000 \
+  -L 8080:127.0.0.1:8080 \
+  user@gpu-server
+```
+
+Then open <http://localhost:3000>. [`../STARTUP.md`](../STARTUP.md) contains a
+complete native FastH3, TURN, and frontend example for this setup.
 
 ## Production process
 

@@ -6,7 +6,7 @@ styled sequence of scenes; the fast-h3 model generates them as 768p video
 clips with synchronized audio; and the stream goes out over RTMP as one
 uninterrupted broadcast.
 
-Three surfaces, one contract:
+The model and its clients share one contract:
 
 | Folder | What it is | Runs on |
 | --- | --- | --- |
@@ -20,10 +20,9 @@ exactly that — through [`reactor-sdk`](https://pypi.org/project/reactor-sdk/),
 the [Reactor Python SDK](https://docs.reactor.inc), which carries the
 session, the commands and messages, and the WebRTC media tracks.
 
-The browser console is adapted from the Reactor Cookbook FastH3 demo. Its
-control mode is a direct queue client. When it attaches to a session already
-owned by `streaming-client`, it becomes read-only so the director remains the
-only queue writer and its viewer/filler ordering stays authoritative.
+The browser console is adapted from the Reactor Cookbook FastH3 demo. It can
+create and control its own queue session, or join a session owned by
+`streaming-client` as a read-only monitor.
 
 ## The model
 
@@ -38,8 +37,8 @@ queue-and-playout contract for the Reactor platform.
 
 ## Quickstart
 
-Serve the model (locally with `reactor run` from `fast-h3/`, or deploy it),
-then:
+Serve the model (locally with `reactor run` from `fast-h3/`, or deploy it).
+To run the automated livestream:
 
 ```sh
 cd streaming-client
@@ -49,7 +48,7 @@ python main.py --local --sink noop  # dry run against a local runtime
 python main.py                      # everything from .env
 ```
 
-Run the browser console in another terminal:
+To use the interactive browser console instead:
 
 ```sh
 cd frontend
@@ -57,13 +56,15 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Open <http://localhost:3000>. Leave the session field blank for control mode,
-or enter the streaming client's session id for read-only monitoring.
+Open <http://localhost:3000>. Leave the session field blank to create a
+frontend-owned session, or enter the streaming client's session id to monitor
+an existing stream without changing its queues. See
+[`frontend/README.md`](./frontend/README.md) for hosted and remote setup.
 
 ## Documentation
 
-- [`STARTUP.md`](./STARTUP.md) — the exact native FastH3, TURN-over-TCP, and
-  browser-console commands used by this server.
+- [`STARTUP.md`](./STARTUP.md) — run the native FastH3 browser console on a
+  remote GPU server through SSH and TURN-over-TCP.
 - [`fast-h3/README.md`](./fast-h3/README.md) — the model: the queue contract,
   weights layout, GPU/CUDA prerequisites, performance profile, and deployment
   learnings.
