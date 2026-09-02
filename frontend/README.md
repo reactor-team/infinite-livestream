@@ -32,6 +32,11 @@ Open <http://localhost:3000>. To monitor an already-running local livestream,
 copy its Reactor session id into the connection field or set
 `REACTOR_SESSION_ID` before starting Next.js.
 
+The browser connects through the same-origin `/reactor` path. Next.js proxies
+that path to `REACTOR_INTERNAL_URL` (default `http://localhost:8080`), so remote
+development only needs to forward port 3000 and never exposes the Reactor
+runtime directly.
+
 ## Production process
 
 ```sh

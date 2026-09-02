@@ -8,7 +8,7 @@ export interface FrontendConfig {
 }
 
 const DEFAULT_MODEL_NAME = "fast-h3";
-const DEFAULT_LOCAL_URL = "http://localhost:8080";
+const DEFAULT_LOCAL_URL = "/reactor";
 
 /** Resolve connection settings without exposing an API key to the browser. */
 export function readConfig(): FrontendConfig {
