@@ -10,11 +10,27 @@ scene's length in seconds.
 Why the prompt is written the way it is — these rules come from how fast-h3
 actually behaves, so keep them intact when editing:
 
-  * **Every scene is an independent clip with no memory.** The single biggest
-    quality lever. A scene that says "the same forest" renders a *different*
-    forest; each scene must re-describe the entire setting, subjects, light,
-    and style from scratch. (Learned on the earlier story-livestream client,
-    where under-described scenes visibly "lost" characters between cuts.)
+  * **The model reads only the scene's own text.** The single biggest
+    quality lever. Whatever the generation mode, a scene prompt is the only
+    text the model sees for that clip: each scene must re-describe the
+    entire setting, subjects, light, and style from scratch. Without
+    chaining, "the same forest" renders a *different* forest; with chaining
+    the place carries over visually but still mutates unless the text keeps
+    naming it. (Learned on the earlier story-livestream client, where
+    under-described scenes visibly "lost" characters between cuts.)
+  * **Chained scenes must open on a hard cut, and the cut must be
+    described.** On a continuation-capable deployment the director chains a
+    story's scenes: each clip after the first opens on the previous clip's
+    final frame. A chain written as one continuous take degrades visibly —
+    every clip re-generates from a generated frame, small errors compound
+    link over link, and within a few scenes the picture smears beyond use
+    ("cooks"). A hard cut resets that: a scene that opens on a *new shot* —
+    different camera angle, distance, or location, described from scratch —
+    re-establishes the whole image, so the chain stays sharp indefinitely.
+    The chained rules below therefore require every scene after the first
+    to open with an explicit cut to a fully described new shot, and forbid
+    "the camera continues..." / "still on..." phrasing. This rule is
+    load-bearing; never soften it.
   * **800 characters is the model's hard cap per prompt** (`MAX_PROMPT_CHARS`
     in `fasth3_types.py`); the LLM is told 750 to leave headroom, and
     `_sanitize` hard-truncates anyway, because LLMs do not count characters
@@ -71,11 +87,11 @@ every scene prompt, never contradict it:
 {style}
 
 HOW THE VIDEO MODEL WORKS (hard constraints):
-- Each scene becomes ONE independent clip. The model has NO memory between
-  clips: every scene prompt must be fully self-contained and re-describe the
-  entire setting, subjects, lighting, palette, mood, and style — even when
-  nothing changed from the previous scene. Anything you omit will vanish or
-  mutate between scenes.
+- Each scene becomes ONE clip, and the model reads ONLY that scene's text —
+  it never sees the other scene prompts. Every scene prompt must be fully
+  self-contained and re-describe the entire setting, subjects, lighting,
+  palette, mood, and style — even when nothing changed from the previous
+  scene. Anything you omit will vanish or mutate between scenes.
 - Each scene prompt must be under {target_chars} characters. This is a hard
   limit; prefer cutting adjectives over cutting subjects or setting.
 - Each scene has a duration in seconds, between {min_seconds} and
@@ -123,6 +139,35 @@ HOW MANY SCENES, AND HOW LONG — two shapes; pick what the idea calls for:
 - Consecutive scenes play back-to-back as one sequence. Make them feel
   continuous: repeat the shared setting and subjects verbatim enough that
   they read as the same place, and change only what the story moves."""
+
+_MULTI_SCENE_RULES_CHAINED = """\
+HOW MANY SCENES, AND HOW LONG — two shapes; pick what the idea calls for:
+- ONE SCENE: a single clip that ALWAYS runs the full {max_seconds} seconds —
+  never shorter — with room for the scene to build, land, and breathe.
+  Right for a mood, a place, a single action or gag. When in doubt, this.
+- CHUNKED SHORT STORY: 3 to {max_chunks} chunks that read as one story with
+  a setup, a development, and a payoff. Content chunks run 8-{max_seconds}
+  seconds; the short end ({min_seconds}-8 s) is ONLY for transitions — an
+  establishing cut, a reaction beat, a snap punchline — never for a chunk
+  that carries the story. Choose this shape when the idea implies
+  narrative: a journey, a transformation, a chase, a build-up.
+- Never more than {max_chunks} scenes. Do not pad a thin idea into many
+  chunks; a story earns its chunks or it is one full-length scene.
+- The story's scenes are rendered as ONE continuous video: each scene
+  begins on the exact final frame of the scene before it. Because of that,
+  EVERY SCENE AFTER THE FIRST MUST OPEN ON A HARD CUT — a new shot with a
+  clearly different camera angle, distance, or location — and its prompt
+  must describe that new shot in full, as if the camera were set up fresh.
+  Open the prompt with the cut itself, e.g. "Hard cut to a wide shot of
+  ...", "Cut to: inside the lighthouse, a close-up of ...".
+- NEVER write a scene that extends the previous scene's shot. No "the
+  camera continues", "still on her face", "the shot lingers", "we keep
+  following" — holding one take across scenes makes the picture smear and
+  degrade scene over scene, while a clean cut keeps every scene sharp.
+  Cuts are also film language: use them for rhythm, not just hygiene.
+- Even across cuts the story stays continuous: re-describe the same
+  setting and subjects verbatim enough that they read as the same place
+  and cast, and change only what the story moves."""
 
 _SINGLE_SCENE_RULES = """\
 HOW MANY SCENES, AND HOW LONG:
@@ -189,6 +234,7 @@ class PromptUpsampler:
         max_seconds: float,
         generated: bool = False,
         max_chunks: int | None = None,
+        chained: bool = False,
     ) -> SceneGroup:
         """One idea in, one validated scene group out. Never raises.
 
@@ -196,12 +242,18 @@ class PromptUpsampler:
         `state_update`, so the LLM always chooses within what the deployment
         actually accepts. `max_chunks` caps this call below the configured
         ceiling (the idle filler passes 1 so its groups stay one-clip and
-        evictable). On any LLM failure the raw prompt (styled, truncated)
-        becomes a single scene — the stream keeps moving.
+        evictable). `chained` says the director will chain this group's
+        scenes on the model (each clip opening on the previous one's final
+        frame), which switches the multi-scene rules to the chained set:
+        every scene after the first opens on a described hard cut, never a
+        continuation of the same take (see the module docstring for why).
+        On any LLM failure the raw prompt (styled, truncated) becomes a
+        single scene — the stream keeps moving.
         """
         chunk_cap = min(max_chunks or self._max_chunks, self._max_chunks)
+        multi_rules = _MULTI_SCENE_RULES_CHAINED if chained else _MULTI_SCENE_RULES
         scene_count_rules = (
-            _MULTI_SCENE_RULES.format(
+            multi_rules.format(
                 max_chunks=chunk_cap,
                 min_seconds=f"{min_seconds:g}",
                 max_seconds=f"{max_seconds:g}",

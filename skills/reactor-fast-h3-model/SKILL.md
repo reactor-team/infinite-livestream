@@ -1,6 +1,6 @@
 ---
 name: reactor-fast-h3-model
-description: Full context for the fast-h3 model in this repo — what FastH3/MiniMax-H3 is, how the Reactor Runtime serves it, the queue contract and every design decision behind it, the measured performance profile and its load-bearing tricks, and how to build and run it with the reactor CLI or raw docker. Read before changing anything under fast-h3/, debugging generation speed or crashes, serving the model locally, or writing a client against it.
+description: Full context for the fast-h3 model in this repo — what FastH3/MiniMax-H3 is, how the Reactor Runtime serves it, the queue contract and every design decision behind it, the hosted deployment's extended contract (clip continuation and the hard-cut prompting rule that keeps chains from degrading), the measured performance profile and its load-bearing tricks, and how to build and run it with the reactor CLI or raw docker. Read before changing anything under fast-h3/, debugging generation speed or crashes, serving the model locally, or writing a client against it.
 ---
 
 # The fast-h3 model: full working context
@@ -162,6 +162,69 @@ the broadcast can never disagree; audio is downmixed to mono int16 48 kHz in
 the backend because the transport downmixes anyway and stereo would corrupt
 runtime recordings.
 
+## 3b. The hosted deployment's extended contract — and the one rule that keeps chains watchable
+
+The hosted deployment of this model, **`reactor/fast-h3`**, serves an
+extended build of the contract above. The source in this repo predates the
+extension and stays as-is; this section documents the extension **as a
+client sees it on the wire**, because the streaming client in this repo
+uses it and any agent driving the hosted model must know these rules.
+
+What the extension adds, all client-observable:
+
+- **Clip continuation.** `enqueue` takes `continue_from_clip_id`: the new
+  clip opens on the named clip's last frame and animates forward. The
+  source may be any clip in either queue or in `queue_update.history` — a
+  capped, oldest-evicted list of built clips that already played but stay
+  continuable — and a clip continuing an unbuilt source waits its turn
+  without blocking other builds. When autoplay's next clip continues the
+  one just finished, the handover is **seamless**: no flush, no black, one
+  uninterrupted stream. `ClipInfo` grows `continue_from_clip_id` and
+  `has_starting_frame`; `pop` refuses an unbuilt clip that queued clips
+  still continue from (pop the dependents first); a failed build fails the
+  clips waiting on it, each with its own `clip_failed`.
+- **Starting images.** `enqueue` takes a `starting_frame` upload — the
+  still is fitted to the canvas and animated forward (image-to-video). At
+  most one of `starting_frame` and `continue_from_clip_id` per clip. The
+  streaming client in this repo deliberately does not use this yet
+  (deferred to a feature where an episode contributes the image).
+- **`set_flush_on_clip_end`.** On (default), non-continuing clip
+  boundaries cut to black; off, they hold the last frame. Chained
+  handovers never flush either way; `reset` always clears the tracks.
+
+A client should detect the extension from the fields only it publishes
+(`state_update.flush_on_clip_end`, `queue_update.history`) rather than
+assume it from the model name — the base contract refuses fields it does
+not know.
+
+### The hard-cut rule (do not let an agent skip this)
+
+**Every chained clip's prompt must open on an explicit hard cut to a fully
+described new shot.** A continued clip re-generates from a generated frame:
+chain clips as one continuous take — same shot, camera "continuing" — and
+the generation errors in each link's final frame compound into the next,
+until within a few links the picture visibly smears and degrades beyond
+use (it "cooks"). A hard cut resets that: opening the prompt with a new
+shot — a clearly different camera angle, distance, or location, described
+from scratch — re-establishes the whole image while the chain keeps story
+continuity, so a chain stays sharp indefinitely.
+
+Concretely, when writing or generating prompts for chained clips:
+
+- Open the prompt with the cut itself: "Hard cut to a wide shot of ...",
+  "Cut to: inside the lighthouse, a close-up of ...".
+- Never phrase a chained clip as an extension of the previous shot: no
+  "the camera continues", "still on her face", "the shot lingers", "we
+  keep following".
+- Keep re-describing everything. The model reads only the clip's own text;
+  the inherited last frame carries the picture over, but subjects and
+  setting the text omits still mutate or vanish.
+- When an LLM writes the prompts (the streaming client's upsampler), these
+  rules must be in its system prompt — an unguided LLM writes continuous
+  takes by default, and the stream degrades on air. The upsampler's
+  chained rules in `streaming-client/upsampler.py` are the reference
+  implementation; treat them as load-bearing.
+
 ## 4. The performance profile — every piece is load-bearing
 
 Measured end state on four B200s: **14.4 s per 14.375 s clip (1.0x
@@ -278,6 +341,7 @@ PYTHONPATH=. python -m pytest tests/ -q
 from reactor_sdk import Reactor
 reactor = Reactor("fast-h3", local=True)                                # :8080
 reactor = Reactor("fast-h3", local=True, api_url="http://localhost:8082")  # custom port
+reactor = Reactor("reactor/fast-h3", api_key="rk_...")   # hosted (extended contract, §3b)
 await reactor.connect()                       # second client: connect(session_id=...)
 ```
 

@@ -1,6 +1,6 @@
 ---
 name: reactor-streaming-client
-description: Full context for the streaming client in this repo — the philosophy that splits it from the fast-h3 model, the chat→moderation→upsampling→two-queue→playout pipeline, every load-bearing scheduling policy (viewer priority, FIFO, drops, backpressure), the media path (pacer, sinks, overlay), and how to run and verify it. Read before changing anything under streaming-client/, debugging the broadcast, adding a sink or chat platform, or tuning the prompt/scheduling behaviour.
+description: Full context for the streaming client in this repo — the philosophy that splits it from the fast-h3 model, the chat→moderation→upsampling→two-queue→playout pipeline, every load-bearing scheduling policy (viewer priority, FIFO, drops, backpressure, clip chaining on the hosted extended contract and the hard-cut prompting rule that keeps chains from degrading), the media path (pacer, sinks, overlay), and how to run and verify it. Read before changing anything under streaming-client/, debugging the broadcast, adding a sink or chat platform, or tuning the prompt/scheduling behaviour.
 ---
 
 # The streaming client: full working context
@@ -104,6 +104,25 @@ bit rests:
    playout capacity — see below), and always produces single-scene
    max-length groups — the finest pop granularity, and popping one never
    truncates a story.
+7. **Story groups chain when the deployment can.** Against the hosted
+   `reactor/fast-h3` (detected via `link.supports_continuation` from the
+   fields only the extended contract publishes in `state_update` — never
+   assumed from the model name), each scene after a group's first is
+   enqueued with `continue_from_clip_id` naming the previous scene's clip:
+   it opens on that clip's last frame and autoplay hands the pair over
+   seamlessly, so a chunked story airs as one uninterrupted video. Three
+   sub-rules keep this safe: (a) **every chained scene's prompt opens on a
+   described hard cut** — the upsampler's chained rules, see section 5 —
+   because a chain written as one continuous take compounds generation
+   errors until the picture degrades on air; (b) a chained enqueue refused
+   twice (a reconnect loses the source server-side) degrades to a
+   standalone clip rather than stalling the group; (c) mass pops (the
+   preset-switch flush) remove dependents before their unbuilt sources,
+   since the extended `pop` refuses an unbuilt clip other clips continue
+   from. Against the in-repo model no continuation field is ever sent and
+   groups play back-to-back with a flush between, exactly as before. The
+   extended `starting_frame` upload is deliberately unused (deferred to an
+   episode-image feature).
 
 ### What the two capacities mean to this client
 
@@ -167,6 +186,18 @@ client changing:
   lengths are transition chunks inside stories only. Up to 3 attempts per
   idea, each request-tagged (the gateway caches identical requests), then a
   raw-prompt fallback; over-long output is cut at a sentence boundary.
+  **The chained rules are the newest load-bearing constraint**: when the
+  director will chain a group (`chained=True`, policy 7), the multi-scene
+  rules switch to `_MULTI_SCENE_RULES_CHAINED`, which requires every scene
+  after the first to open on an explicit hard cut to a fully described new
+  shot (different camera angle, distance, or location — "Hard cut to a
+  wide shot of ...") and forbids extending the previous take ("the camera
+  continues...", "still on..."). A chained clip re-generates from a
+  generated frame; one continuous take compounds those errors link over
+  link until the image degrades on air, and the described cut is what
+  resets it. An unguided LLM writes continuous takes by default — never
+  soften or drop these rules, and keep the self-containment rule beside
+  them (the model reads only the scene's own text, chained or not).
 - **Moderator** (`moderator.py`): the *only* safety gate — the upsampler
   deliberately stages ideas faithfully. Own endpoint/key (`MODERATION_*`),
   because inference gateways typically do not expose `/moderations`;
@@ -212,6 +243,14 @@ python main.py                       # everything from .env
   older image every enqueue still works but the mirrors stay empty — if the
   queues log as 0/0 while builds clearly run, the served image predates the
   contract.
+- The **extended contract** (clip continuation, `queue_update.history`,
+  `set_flush_on_clip_end`) is optional on top of that: the connect log line
+  says `continuation supported` or `unsupported`, and everything chained
+  gates on `link.supports_continuation`. The hosted `reactor/fast-h3`
+  supports it (the `.env.example` default); a local `reactor run` of the
+  in-repo model does not, and the client falls back to independent clips
+  on its own — do not "fix" the fallback by sending continuation fields
+  unconditionally.
 
 ## 8. Keeping this skill true
 
