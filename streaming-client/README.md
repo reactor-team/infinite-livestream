@@ -70,6 +70,42 @@ flushes to black until the next `play`. Both queues are bounded
 pauses while playout is full) and a full generation queue refuses `enqueue`
 with a `command_error`.
 
+### The hosted deployment's extended contract
+
+The hosted deployment, **`reactor/fast-h3`**, extends that contract, and
+this client uses the extension when it is there:
+
+- **Clip continuation.** `enqueue` also takes `continue_from_clip_id`: the
+  new clip opens on the named clip's last frame, and when autoplay's next
+  clip continues the one just finished the handover is **seamless** — no
+  black, no cut, one uninterrupted video. The source may be any clip in
+  either queue or in `queue_update.history` (built clips stay
+  referenceable for a while after playing, evicted oldest first); a clip
+  continuing an unbuilt source just waits its turn. `pop` refuses an
+  unbuilt clip that queued clips still continue from — pop dependents
+  first (the preset-switch flush does).
+- **Starting images.** `enqueue` also takes a `starting_frame` upload
+  (image-to-video). This client deliberately does not use it yet — it is
+  deferred to a separate feature where an episode contributes the image.
+- **`set_flush_on_clip_end`.** Chooses whether non-continuing clip
+  boundaries cut to black (default) or hold the last frame. This client
+  keeps the default.
+
+The client **detects** the extension from `state_update`
+(`link.supports_continuation`) rather than assuming it from the model
+name: against the original in-repo model every clip stays independent, no
+continuation field is ever sent, and scene groups play back-to-back with a
+flush between — the pre-extension behaviour, intact.
+
+**The one rule that keeps chains watchable: every chained scene opens on a
+described hard cut.** A chained clip re-generates from a generated frame;
+a chain written as one continuous take compounds those generation errors
+link over link until the picture visibly smears ("cooks"). A hard cut to a
+fully described new shot re-establishes the whole image, so the chain
+stays sharp indefinitely. The upsampler's chained rules enforce this (see
+"Prompt upsampling"); never write or prompt a chained scene as "the camera
+continues...".
+
 ## Scene groups
 
 One chat prompt becomes one **scene group**. The upsampler picks the shape
@@ -97,6 +133,15 @@ it coherent:
 3. A group is enqueued only once **all** its scenes fit in the remaining
    capacity, so it can't wedge half-in. Viewer groups may make that room by
    evicting filler clips (see "Idle filler" below).
+4. On a continuation-capable deployment, a group's scenes are **chained**:
+   each scene after the first is enqueued with `continue_from_clip_id`
+   naming the previous scene's clip, so the story plays as one
+   uninterrupted video instead of clips separated by black. Every chained
+   scene's prompt opens on a hard cut (the upsampler's chained rules — see
+   below), which is what keeps a chain from degrading. A chained enqueue
+   refused twice (a reconnect loses the source clip server-side) falls
+   back to a standalone clip: the scene prompts are self-contained, so a
+   lost link costs the seamless handover, never the story.
 
 Each scene's `metadata` carries the group tag as JSON:
 
@@ -122,8 +167,18 @@ JSON bundle in `presets/`; format in `config.py`'s `load_preset`). The
 prompt's rules mirror how fast-h3 actually behaves — keep them intact when
 editing (rationale in the module docstring):
 
-- every scene is an independent clip with **no memory**, so every scene
-  prompt must re-describe the full setting/subjects/style from scratch;
+- the model reads **only the scene's own text**, so every scene prompt must
+  re-describe the full setting/subjects/style from scratch — chained or
+  not, anything the text omits vanishes or mutates;
+- **chained stories are written as cuts**: when the director will chain a
+  group (`chained=True`), the multi-scene rules switch to the chained set —
+  each scene after the first begins on the previous scene's final frame, so
+  its prompt **must open on a hard cut to a fully described new shot**
+  (different camera angle, distance, or location) and must never extend the
+  previous take ("the camera continues...", "still on..."). Holding one
+  take across chained clips compounds generation errors until the image
+  degrades; a described cut re-establishes it. This rule is load-bearing —
+  never soften it;
 - the LLM is asked for < 750 chars but `_sanitize` **hard-truncates to 800**
   (`MAX_PROMPT_CHARS`, the model's server-side cap) because LLMs can't count;
 - fast-h3 renders audio including clear spoken language, so the prompt
@@ -295,11 +350,13 @@ there.
 pip install -r requirements.txt   # ffmpeg must be on PATH for SINK=rtmp
 cp .env.example .env              # fill in keys, style, sink, chat
 
-# Dry run against a local `reactor run`, throwing frames away:
-python main.py --local --sink noop
+# Dry run against a local `reactor run` of ../fast-h3, throwing frames away
+# (local serves the in-repo model as `fast-h3` — set REACTOR_MODEL, or pass it):
+python main.py --local --sink noop --model fast-h3
 
-# Hosted model, streaming to Twitch, prompts from Twitch chat:
-#   .env: REACTOR_API_KEY=rk_..., TWITCH_CHANNEL=yourchannel, STYLE=...
+# Hosted model (`reactor/fast-h3`, the default in .env.example), streaming
+# to Twitch, prompts from Twitch chat:
+#   .env: REACTOR_API_KEY=rk_..., TWITCH_CHANNEL=yourchannel, PRESET=...
 python main.py --sink rtmp --rtmp-url rtmp://live.twitch.tv/app/STREAM_KEY
 
 # YouTube: RTMP_URL=rtmp://a.rtmp.youtube.com/live2/KEY plus
@@ -373,6 +430,14 @@ which took many iterations to stabilize) and from driving the fast-h3 queue:
   budget; every capacity read from `state_update`; pacer/sink never torn
   down on reconnect; sinks never block the event loop; overlays never
   mutate the pacer's frame and stay within a few ms per compose.
+- **Continuation invariants:** the extended surface is gated on
+  `link.supports_continuation` (detected from `state_update`, never assumed
+  from the model name); a continuation field is never sent to a deployment
+  that did not publish the surface; every chained scene's prompt opens on a
+  described hard cut (the upsampler's chained rules — the anti-degradation
+  rule above); a refused chained enqueue degrades to a standalone clip
+  rather than stalling; mass pops (the preset-switch flush) remove
+  dependents before their unbuilt sources.
 - `../fast-h3/fasth3_types.py` is the wire contract. If the model's schema moves
   (new fields, renamed messages), update `reactor_link.py`'s mirror and the
   director's message handling together, and re-check this README's model

@@ -13,7 +13,15 @@
 
 The model contract this speaks is the fast-h3 clip queue (`../fast-h3/fasth3_types.py`
 is the authoritative reference): `enqueue` → `clip_queued`, builds crossing
-into the playout queue on `clip_generated`. Autoplay is on for gapless
+into the playout queue on `clip_generated`. The hosted deployment
+(`reactor/fast-h3`) serves an extended build of that contract — `enqueue`
+additionally takes `continue_from_clip_id` (the clip opens on the named
+clip's last frame), `queue_update` carries a retained `history` of built
+clips that can still be continued from, and `state_update` carries
+`flush_on_clip_end`. The link mirrors all of it and exposes
+`supports_continuation` so the director lights the chaining path up only
+when the deployment actually publishes it; against the original in-repo
+model everything degrades to independent clips. Autoplay is on for gapless
 chaining; the director owns the *order*, curating the playout front with
 `move` from the metadata echo (viewer content before filler — see
 `Director.run_playout`).
@@ -74,6 +82,7 @@ class ReactorLink:
         self.state: dict[str, Any] = dict(_DEFAULT_STATE)
         self.generation_clips: list[dict] = []
         self.playout_clips: list[dict] = []
+        self.history_clips: list[dict] = []
 
     # -------------------------------------------------------------- wiring
 
@@ -117,6 +126,18 @@ class ReactorLink:
         return int(self.state["width"]), int(self.state["height"])
 
     @property
+    def supports_continuation(self) -> bool:
+        """Whether the connected deployment speaks the extended contract.
+
+        The extended surface (`enqueue`'s `continue_from_clip_id`, the
+        `queue_update.history` list) is detected from the fields only it
+        publishes in `state_update` — never assumed from the model name.
+        False against the original in-repo model, where every clip is
+        independent and the client must not send continuation fields.
+        """
+        return "flush_on_clip_end" in self.state
+
+    @property
     def connected(self) -> bool:
         """Whether a session is live right now (commands would go through)."""
         return self._ready.is_set()
@@ -135,6 +156,8 @@ class ReactorLink:
         elif kind == "queue_update":
             self.generation_clips = data.get("generation", [])
             self.playout_clips = data.get("playout", [])
+            # Extended contract only; absent on the original model.
+            self.history_clips = data.get("history", [])
         elif kind == "command_error":
             logger.warning(
                 "[reactor] command refused: %s — %s",
@@ -223,10 +246,11 @@ class ReactorLink:
             self.state = state
         logger.info(
             "[reactor] canvas %dx%d, clip range %.3f-%.3fs, "
-            "generation %d/%d, playout %d/%d",
+            "generation %d/%d, playout %d/%d, continuation %s",
             *self.canvas, self.min_seconds, self.max_seconds,
             self.generation_queued, self.generation_capacity,
             self.playout_queued, self.playout_capacity,
+            "supported" if self.supports_continuation else "unsupported",
         )
 
         # Autoplay on: the model chains the playout queue's front clip the

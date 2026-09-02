@@ -23,6 +23,16 @@ knowledge the model deliberately never has. Rules that keep it coherent:
     the playout loop pops one built filler per tick when a full playout
     queue blocks a viewer's build, and the idle filler stands down whenever
     viewer work is pending.
+  * On a deployment that supports continuation (`link.supports_continuation`
+    — the hosted `reactor/fast-h3`), a story group's scenes are chained:
+    each scene after the first is enqueued with `continue_from_clip_id`
+    naming the previous scene's clip, so it opens on that clip's last frame
+    and autoplay hands the pair over seamlessly — one uninterrupted story
+    instead of clips separated by black. The upsampler writes every chained
+    scene to open on a hard cut (see its module docstring for why); the
+    director only wires the chain. A refused chained enqueue falls back to
+    a standalone clip after two retries — the scene prompts are
+    self-contained, so a lost link degrades the handover, never the story.
 
 Every scene carries the group's identity in the clip's `metadata` — an opaque
 string fast-h3 stores and echoes back on every message that references the
@@ -126,9 +136,14 @@ class Director:
                 keep = self._link.playout_clips[0]["clip_id"]
             elif self._link.generation_clips:
                 keep = self._link.generation_clips[0]["clip_id"]
+            # Built (playout) clips first, then the generation queue back to
+            # front: on the extended contract `pop` refuses an unbuilt clip
+            # that queued clips still continue from, so dependents must go
+            # before their sources.
             doomed = [
                 clip
-                for clip in self._link.generation_clips + self._link.playout_clips
+                for clip in self._link.playout_clips
+                + list(reversed(self._link.generation_clips))
                 if clip["clip_id"] != keep
             ]
             popped = 0
@@ -210,6 +225,7 @@ class Director:
                     source=prompt.source,
                     min_seconds=self._link.min_seconds,
                     max_seconds=self._link.max_seconds,
+                    chained=self._link.supports_continuation,
                 )
                 await self._enqueue_group(group)
             except asyncio.CancelledError:
@@ -347,6 +363,13 @@ class Director:
         the group is dropped with the queues intact — a backlog full of
         viewer content takes no more, rather than stalling every later
         prompt behind a wait.
+
+        On a continuation-capable deployment, each scene after the first
+        continues the previous scene's clip (`continue_from_clip_id`), so
+        the group plays as one uninterrupted story. The chain is dropped
+        per scene after two refused attempts — a source clip lost to a
+        reconnect must not stall the group — and the scene enqueues as a
+        standalone clip instead (a hard cut, which its prompt already is).
         """
         scene_count = len(group.scenes)
         async with self._enqueue_lock:
@@ -373,6 +396,8 @@ class Director:
                 None if group.generated
                 else viewer_insert_position(self._link.generation_clips)
             )
+            chain = self._link.supports_continuation
+            previous_clip_id: str | None = None
             for index, scene in enumerate(group.scenes, start=1):
                 metadata = json.dumps(
                     {
@@ -398,19 +423,45 @@ class Director:
                     # Consecutive positions keep the group contiguous and in
                     # scene order, ahead of the filler it displaced.
                     payload["position"] = position + index - 1
+                if chain and previous_clip_id is not None:
+                    # The scene opens on the previous scene's last frame and
+                    # autoplay hands the pair over with no cut to black. The
+                    # scene prompt itself opens on a hard cut (the
+                    # upsampler's chained rules), so the chain stays sharp.
+                    payload["continue_from_clip_id"] = previous_clip_id
+                chained_refusals = 0
                 while True:
                     reply = await self._link.send_command("enqueue", payload)
                     if isinstance(reply, dict) and "clip" in reply:
                         clip = reply["clip"]
                         logger.info(
-                            "[director] queued %s scene %d/%d as %s (%.1fs, seed %s)%s",
+                            "[director] queued %s scene %d/%d as %s (%.1fs, seed %s)%s%s",
                             group.group_id, index, scene_count,
                             clip["clip_id"][:8], clip["seconds"], clip["seed"],
                             " [auto]" if group.generated else "",
+                            f" ← {previous_clip_id[:8]}"
+                            if payload.get("continue_from_clip_id") else "",
                         )
+                        previous_clip_id = clip["clip_id"]
                         break
                     # Bodyless reply = refused (command_error was logged by the
                     # link) or the session dropped mid-command; wait and retry.
+                    if "continue_from_clip_id" in payload:
+                        # A reconnect loses the source clip server-side, and a
+                        # chained enqueue naming it is refused forever. Two
+                        # strikes, then the scene enqueues standalone — its
+                        # prompt is a self-contained cut, so only the seamless
+                        # handover is lost, never the story.
+                        chained_refusals += 1
+                        if chained_refusals >= 2:
+                            del payload["continue_from_clip_id"]
+                            logger.warning(
+                                "[director] %s scene %d/%d: dropping the "
+                                "continuation after %d refusals; enqueueing "
+                                "as a standalone cut",
+                                group.group_id, index, scene_count,
+                                chained_refusals,
+                            )
                     logger.warning(
                         "[director] enqueue of %s scene %d/%d refused; retrying in %.0fs",
                         group.group_id, index, scene_count, _RETRY_DELAY_S,

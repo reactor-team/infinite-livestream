@@ -32,13 +32,30 @@ The model is **two queues plus a player**. `enqueue` takes a prompt
 and UUID. Builds consume the generation queue front-first, always (pausing
 only while the playout queue is full); each finished clip crosses into the
 **playout queue** (`clip_generated`), where `play`, `move`, and `pop` give
-the client full positional control. Nothing plays until `play` (this client
-keeps `set_autoplay` off and drives playout itself). Playback streams 24 fps
+the client full positional control. Nothing plays until `play` or autoplay
+(this client keeps `set_autoplay` **on** for millisecond clip handovers and
+curates the playout *front* with `move`). Playback streams 24 fps
 video (`main_video`, 1344×768 at the default
 16:9 canvas) and 48 kHz mono int16 audio (`main_audio`), then flushes to
 black and holds. The metadata is echoed untouched on every message that
 references the clip — it is how a client correlates clips with its own
 records without local joins.
+
+The **hosted deployment, `reactor/fast-h3`, extends that contract**, and
+the client uses the extension when the deployment publishes it
+(`link.supports_continuation`, detected from `state_update`, never assumed
+from the model name): `enqueue` also takes `continue_from_clip_id` — the
+clip opens on the named clip's last frame, and autoplay hands a continuing
+clip over seamlessly (no black, no cut) — plus a `starting_frame` image
+upload (deliberately unused here for now; deferred to a feature where an
+episode contributes the image); built clips stay referenceable through
+`queue_update.history`; `set_flush_on_clip_end` chooses what non-continuing
+boundaries do (this client keeps the default, flush on). The director
+chains a story group's scenes with continuation, so a chunked story plays
+as one uninterrupted video; against the in-repo model everything falls back
+to independent clips with a flush between. The in-repo `fast-h3/` source
+predates the extension and stays as-is — it remains the authoritative
+reference for the base contract only.
 
 The client is a straight pipeline:
 
@@ -51,8 +68,9 @@ chat (Twitch IRC / YouTube API) → Director → Moderator → PromptUpsampler (
 
 One chat prompt becomes one **scene group**: a single scene, or a chunked
 short story of up to `MAX_CHUNKS` short clips — the upsampling LLM picks the
-shape — enqueued contiguously, each clip tagged with a JSON group id in the
-metadata. The director drives playout itself (autoplay off): `pick_next`
+shape — enqueued contiguously (and chained with `continue_from_clip_id` on
+a continuation-capable deployment), each clip tagged with a JSON group id in
+the metadata. The director owns playout order: `pick_next`
 plays viewer content before filler from the playout queue, judged purely
 from the metadata echo, and viewer groups insert into the generation queue
 ahead of waiting filler and behind waiting viewers (`enqueue`'s `position`)
@@ -103,7 +121,18 @@ Director being the queues' only writer (viewer worker, idle filler, and
 4. **Prompts are hard-truncated to 800 chars and scene lengths clamped to
    the live bounds** from `state_update` — never trust the LLM's counting,
    never hardcode bounds the deployment publishes.
-5. **The schema is product surface.** Every `@event`/`InputField`/
+5. **Chained scenes open on described hard cuts.** A clip enqueued with
+   `continue_from_clip_id` opens on the previous clip's final frame; a
+   chain written as one continuous take compounds generation errors link
+   over link until the picture visibly degrades ("cooks"). The upsampler's
+   chained rules therefore make every scene after the first open on an
+   explicit cut to a fully described new shot (different camera angle,
+   distance, or location) and forbid "the camera continues..." phrasing —
+   and the extended surface is only ever used when
+   `link.supports_continuation` says the deployment publishes it. Both
+   halves of this rule are load-bearing: soften the cuts and the stream
+   cooks; send continuation fields blind and the base model refuses them.
+6. **The schema is product surface.** Every `@event`/`InputField`/
    `MessageField` description and `ModelMessage` docstring in `fast-h3/` is
    compiled into the published schema. Describe only what a client can
    observe on the wire (commands, messages, tracks, by wire name in
