@@ -1,7 +1,8 @@
 # Infinite Livestream FastH3 frontend
 
-This Next.js application adapts the Reactor Cookbook FastH3 demo to this
-repository's two-queue model contract. It plays synchronized WebRTC video and
+This Reactor-branded Next.js application adapts the Reactor Cookbook FastH3
+demo to this repository's two-queue model contract. The official Reactor
+lockup anchors the application header. It plays synchronized WebRTC video and
 audio and renders complete generation/playout queue state.
 
 The interface supports two safe operating modes:

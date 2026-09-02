@@ -209,12 +209,13 @@ Director being the queues' only writer (viewer worker, idle filler, and
 
 ## Documentation: who owns what, and the self-maintenance rule
 
-Five documents, five scopes — edit the owner, never a copy, and edit it in
+Six documents, six scopes — edit the owner, never a copy, and edit it in
 the same change as the code it describes:
 
 | Document | Owns | Update when… |
 | --- | --- | --- |
 | `AGENTS.md` (this file; `CLAUDE.md` symlinks here) | System picture, load-bearing invariants, change routing, verification | any invariant, component, or workflow moves |
+| `STARTUP.md` | This server's native model, TURN tunnel, and browser startup commands | a local port, container, cache, or required runtime flag moves |
 | `streaming-client/README.md` | Client architecture, the ffmpeg/RTMP learnings, moderation & idle-filler behaviour, run instructions | client behaviour it describes moves |
 | `frontend/README.md` | Browser control/monitor modes, auth and run instructions | frontend behaviour or configuration moves |
 | `streaming-client/{sinks,chat,overlay}/base.py` docstrings | The sink, chat-source, and overlay interface contracts | the contract itself changes (READMEs only summarize these) |

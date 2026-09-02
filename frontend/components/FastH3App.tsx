@@ -6,6 +6,7 @@ import {
   useReactor,
   useReactorMessage,
 } from "@reactor-team/js-sdk";
+import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { FrontendConfig } from "@/lib/config";
@@ -526,7 +527,15 @@ function FastH3Workspace({ config }: { config: FrontendConfig }) {
     <div className="flex h-screen min-h-[42rem] flex-col overflow-hidden">
       <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-edge bg-panel/80 px-4 py-3 backdrop-blur">
         <div className="flex items-center gap-3">
-          <div className="flex size-8 items-center justify-center rounded-md bg-accent text-sm font-black text-slate-950">R</div>
+          <Image
+            src="/brand/reactor-lockup-white.png"
+            alt="Reactor"
+            width={174}
+            height={20}
+            priority
+            className="h-5 w-auto"
+          />
+          <span className="h-4 w-px bg-edge" aria-hidden="true" />
           <div>
             <p className="text-sm font-semibold leading-none">FastH3 queue console</p>
             <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-faint">Infinite livestream</p>

@@ -62,6 +62,8 @@ or enter the streaming client's session id for read-only monitoring.
 
 ## Documentation
 
+- [`STARTUP.md`](./STARTUP.md) — the exact native FastH3, TURN-over-TCP, and
+  browser-console commands used by this server.
 - [`fast-h3/README.md`](./fast-h3/README.md) — the model: the queue contract,
   weights layout, GPU/CUDA prerequisites, performance profile, and deployment
   learnings.
