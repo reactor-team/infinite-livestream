@@ -4,7 +4,8 @@
 > When a change adds a component, an env var, a command, an invariant, or
 > moves behaviour any document describes, update that document **in the same
 > change**: this file for the system picture, invariants, and routing table;
-> `streaming-client/README.md` for client detail; the `base.py` docstrings
+> `streaming-client/README.md` and `frontend/README.md` for client detail;
+> the `base.py` docstrings
 > for interface contracts; `.env.example` for configuration. A stale map is
 > worse than none — the next agent trusts it and drifts. `CLAUDE.md` is a
 > symlink to this file; never let them diverge into two copies.
@@ -15,8 +16,11 @@ generations, served by the [Reactor Runtime](https://github.com/reactor-team/rea
 as a `reactor` CLI workspace. `streaming-client/` is the client — it reads
 `!prompt` ideas from Twitch/YouTube chat, upsamples them into styled scene
 sequences with an LLM, feeds the model's queue over `reactor-sdk`, and pushes
-the output to an RTMP ingest as one uninterrupted stream. They meet only on
-the wire; `fast-h3/fasth3_types.py` is that contract.
+the output to an RTMP ingest as one uninterrupted stream. `frontend/` is the
+Next.js browser console adapted from the Cookbook FastH3 demo: it can own and
+operate a direct queue session, or attach read-only to the streaming client's
+session for WebRTC playback and queue monitoring. All three meet only on the
+wire; `fast-h3/fasth3_types.py` is that contract.
 
 **Contribution policy:** never commit, push, or open PRs without explicit
 permission from a human maintainer in the current conversation. Commits are
@@ -47,6 +51,9 @@ chat (Twitch IRC / YouTube API) → Director → Moderator → PromptUpsampler (
   presets/<n>.json (filler) ───↗
        → ReactorLink (enqueue + play) → fast-h3
        → Pacer (constant-rate clock) → StreamSink (rtmp | noop | yours)
+
+frontend → own session: enqueue / move / pop / play / settings
+         → existing streaming-client session: read-only queues + WebRTC media
 ```
 
 One chat prompt becomes one **scene group**: a single scene, or a chunked
@@ -108,6 +115,11 @@ Director being the queues' only writer (viewer worker, idle filler, and
    compiled into the published schema. Describe only what a client can
    observe on the wire (commands, messages, tracks, by wire name in
    backticks) — never internals (kernels, caches, config keys, GPU counts).
+6. **A joined frontend is a monitor, not a second scheduler.** A blank session
+   id creates a frontend-owned control session. Supplying an existing session
+   id disables every write in the UI; when `streaming-client` owns that
+   session, its Director remains the only queue writer and its metadata-based
+   viewer/filler policy stays coherent.
 
 ### Where each kind of change goes
 
@@ -123,6 +135,7 @@ Director being the queues' only writer (viewer worker, idle filler, and
 | Idle filler / eviction | `streaming-client/director.py` (`run_idle`, `_evict_fillers`) | README's Idle filler section |
 | A stream's creative identity (style + premade prompts) | `streaming-client/presets/<name>.json` (format in `config.py`'s `load_preset`; only `default.json` is tracked; admins swap presets live with `!switch`) | README's Idle filler + Prompt upsampling sections |
 | What the broadcast shows on top of the video | `streaming-client/overlay/` (contract in `base.py`; shipped overlay in `status.py`) | README's Overlay section; keep compose non-mutating and per-frame cheap |
+| Browser queue controls or monitoring UI | `frontend/` | `frontend/README.md`; root README; preserve control-vs-monitor ownership |
 
 ## Model rules (`fast-h3/`) — distilled from the Reactor cookbook
 
@@ -179,15 +192,32 @@ Director being the queues' only writer (viewer worker, idle filler, and
   `.env` — it holds real API and stream keys; `.env.example` is the template.
   Never print keys; the RTMP sink redacts the stream key in logs.
 
+## Frontend rules (`frontend/`)
+
+- The UI speaks the published FastH3 contract directly through
+  `@reactor-team/js-sdk`; do not invent frontend-only model commands or derive
+  legality when `state_update.valid_commands` already publishes it.
+- Control mode creates its own session and may write both queues. Joining an
+  existing session is always read-only, preserving the streaming Director's
+  single-writer invariant.
+- Web submissions use the same group metadata shape as
+  `streaming-client/group_tag.py`, including `group_id`, scene numbering,
+  author, source and `generated`, so every consumer can explain the clip from
+  the metadata echo alone.
+- Hosted API keys stay in the Next.js server route and are exchanged for a
+  model-scoped JWT. Never expose or commit an API key or `.env`.
+
 ## Documentation: who owns what, and the self-maintenance rule
 
-Four documents, four scopes — edit the owner, never a copy, and edit it in
-the same change as the code it describes:
+Each document has one scope — edit the owner, never a copy, and edit it in the
+same change as the code it describes:
 
 | Document | Owns | Update when… |
 | --- | --- | --- |
 | `AGENTS.md` (this file; `CLAUDE.md` symlinks here) | System picture, load-bearing invariants, change routing, verification | any invariant, component, or workflow moves |
+| `STARTUP.md` | Native model, TURN tunnel, and remote browser startup commands | a port, container, or required runtime flag moves |
 | `streaming-client/README.md` | Client architecture, the ffmpeg/RTMP learnings, moderation & idle-filler behaviour, run instructions | client behaviour it describes moves |
+| `frontend/README.md` | Browser control/monitor modes, auth and run instructions | frontend behaviour or configuration moves |
 | `streaming-client/{sinks,chat,overlay}/base.py` docstrings | The sink, chat-source, and overlay interface contracts | the contract itself changes (READMEs only summarize these) |
 | `skills/*/SKILL.md` | Deep context handoffs: `reactor-fast-h3-model` (the model, its profile, serving), `reactor-streaming-client` (the client's pipeline and policies) | anything they narrate moves — same change, per their own closing sections |
 | `streaming-client/.env.example` + `fast-h3/README.md` | Every knob, with its default; the model's own story | a knob or model surface is added/renamed |
@@ -212,4 +242,10 @@ python main.py --local --sink noop        # against a local `reactor run`
 
 # Raw queue contract smoke test (writes .mp4s + timing report):
 python fast-h3/client/client.py            # or --api-key rk_... for hosted
+
+# Frontend: type safety and a production Next.js build.
+cd frontend
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm build
 ```
