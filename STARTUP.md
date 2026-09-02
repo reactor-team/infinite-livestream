@@ -35,7 +35,10 @@ docker run --rm \
 Run this block in one shell so the randomly generated TURN credential is shared
 by coturn and Reactor Runtime. `NCCL_NVLS_ENABLE=0` avoids this server's Fabric
 Manager rejecting NCCL's NVLink SHARP multicast allocation; regular NVLink P2P
-remains enabled.
+remains enabled. `--server-relay` and `--allow-loopback-peers` are required
+because coturn and the Reactor media peer run on the same host. Keep this TURN
+listener loopback-only and authenticated as shown; do not expose that relay
+configuration on a public listener.
 
 ```sh
 DEMO_TURN_USER=reactor_demo
@@ -58,6 +61,8 @@ docker run -d --rm \
   --realm=infinite-livestream.local \
   --user="$DEMO_TURN_USER:$DEMO_TURN_PASS" \
   --no-udp --no-tls --no-dtls --no-cli --no-multicast-peers \
+  --allow-loopback-peers \
+  --server-relay \
   --total-quota=16 --user-quota=8
 
 docker run -d \
