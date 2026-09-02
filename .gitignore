@@ -18,3 +18,8 @@ streaming-client/presets/*.json
 .vscode/
 .idea/
 .DS_Store
+
+# Next.js frontend products
+frontend/.next/
+frontend/node_modules/
+frontend/*.tsbuildinfo

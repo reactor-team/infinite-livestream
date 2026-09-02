@@ -6,18 +6,24 @@ styled sequence of scenes; the fast-h3 model generates them as 768p video
 clips with synchronized audio; and the stream goes out over RTMP as one
 uninterrupted broadcast.
 
-Two halves, one contract:
+Three surfaces, one contract:
 
 | Folder | What it is | Runs on |
 | --- | --- | --- |
 | [`fast-h3/`](./fast-h3) | The model: a queue of prompt-driven clip generations with explicit/auto playback. A `reactor` CLI workspace. | [Reactor Runtime](https://github.com/reactor-team/reactor-runtime), 8x B200 |
 | [`streaming-client/`](./streaming-client) | The client: chat → prompt upsampling → scene groups → the model's queue → paced RTMP output. | [`reactor-sdk`](https://pypi.org/project/reactor-sdk/) (Python), any box with ffmpeg |
+| [`frontend/`](./frontend) | The browser console: WebRTC playback and complete generation/playout queue UI. It controls a session it creates, or monitors a streaming-client session read-only. | Next.js and [`@reactor-team/js-sdk`](https://www.npmjs.com/package/@reactor-team/js-sdk) |
 
 They meet on the wire: `fast-h3/fasth3_types.py` is the client-facing
 contract (commands, messages, tracks), and the streaming client speaks
 exactly that — through [`reactor-sdk`](https://pypi.org/project/reactor-sdk/),
 the [Reactor Python SDK](https://docs.reactor.inc), which carries the
 session, the commands and messages, and the WebRTC media tracks.
+
+The browser console is adapted from the Reactor Cookbook FastH3 demo. Its
+control mode is a direct queue client. When it attaches to a session already
+owned by `streaming-client`, it becomes read-only so the director remains the
+only queue writer and its viewer/filler ordering stays authoritative.
 
 ## The model
 
@@ -43,6 +49,17 @@ python main.py --local --sink noop  # dry run against a local runtime
 python main.py                      # everything from .env
 ```
 
+Run the browser console in another terminal:
+
+```sh
+cd frontend
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+Open <http://localhost:3000>. Leave the session field blank for control mode,
+or enter the streaming client's session id for read-only monitoring.
+
 ## Documentation
 
 - [`fast-h3/README.md`](./fast-h3/README.md) — the model: the queue contract,
@@ -51,6 +68,8 @@ python main.py                      # everything from .env
 - [`streaming-client/README.md`](./streaming-client/README.md) — the client:
   architecture, sinks and chat sources, moderation, idle filler, presets, and
   the RTMP/ffmpeg learnings.
+- [`frontend/README.md`](./frontend/README.md) — the browser console: local and
+  hosted setup, queue controls, and safe read-only monitoring of a live stream.
 - [`fast-h3/client/README.md`](./fast-h3/client/README.md) — a minimal
   `reactor-sdk` smoke-test client that walks the raw queue contract once.
 - [`AGENTS.md`](./AGENTS.md) — the map for coding agents: system picture,
